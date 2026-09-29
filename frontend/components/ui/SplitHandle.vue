@@ -122,8 +122,9 @@ onBeforeUnmount(() => {
       :title="`展开${label}`"
       @click.stop="emit('toggle')"
     >
-      <PanelRight v-if="side === 'left'" :size="11" />
-      <PanelLeft v-else :size="11" />
+      <!-- 箭头指向面板将被拉回的方向：面板在左 → 朝右展开 -->
+      <PhCaretDoubleRight v-if="side === 'left'" :size="11" />
+      <PhCaretDoubleLeft v-else :size="11" />
     </button>
   </div>
 </template>
