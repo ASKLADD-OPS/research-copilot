@@ -179,12 +179,15 @@ onMounted(() => {
           正在上传 {{ uploading }}…
         </p>
 
-        <div v-if="!library.loaded" class="space-y-2 p-2.5">
-          <span v-for="i in 6" :key="i" class="block h-9 animate-pulse rounded-md bg-sunken" />
+        <!-- 错误必须排在骨架前面：loaded 只在成功时置 true，
+             若骨架用 !loaded 且排在前面，请求一失败就会永远停在骨架屏上，
+             errorMessage 永远没机会显示。 -->
+        <div v-if="library.errorMessage" class="m-2.5 rounded-md bg-bad-soft px-2 py-1.5 text-2xs text-bad">
+          {{ library.errorMessage }}
         </div>
 
-        <div v-else-if="library.errorMessage" class="m-2.5 rounded-md bg-bad-soft px-2 py-1.5 text-2xs text-bad">
-          {{ library.errorMessage }}
+        <div v-else-if="!library.loaded" class="space-y-2 p-2.5">
+          <span v-for="i in 6" :key="i" class="block h-9 animate-pulse rounded-md bg-sunken" />
         </div>
 
         <div v-else-if="!library.items.length" :class="EMPTY_CLS">
