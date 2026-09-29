@@ -1,0 +1,74 @@
+"""Pydantic v2 请求/响应模型。
+
+约定：
+- 所有响应统一包在 `ApiResponse[T]` 里（见 `common.py`），路由层用 `ApiResponse.ok(...)` 返回；
+- 请求体模型命名 `XxxRequest`，响应体 `XxxOut` / `XxxDetail`，避免和 ORM 模型撞名。
+"""
+
+from app.schemas.common import CODE_OK, ApiResponse, HealthComponent, HealthReport, Page, PageMeta
+from app.schemas.graph import GraphAnalysisRequest, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut
+from app.schemas.paper import (
+    PaperChunkOut,
+    PaperCreate,
+    PaperDetail,
+    PaperOut,
+    PaperUpdate,
+    PaperUploadResult,
+)
+from app.schemas.qa import (
+    AskRequest,
+    AskResult,
+    CitationOut,
+    RetrievalDebug,
+    RetrievedChunkOut,
+    TraceRequest,
+    TraceResult,
+)
+from app.schemas.task import TaskOut
+from app.schemas.tool import ToolCallRequest, ToolCallResult, ToolInfo, ToolListOut
+from app.schemas.writing import (
+    BilingualPair,
+    TranslateRequest,
+    TranslateResult,
+    WriteRequest,
+    WriteResult,
+    WritingTemplateOut,
+)
+
+__all__ = [
+    "CODE_OK",
+    "ApiResponse",
+    "AskRequest",
+    "AskResult",
+    "BilingualPair",
+    "CitationOut",
+    "GraphAnalysisRequest",
+    "GraphAnalysisResult",
+    "GraphEdge",
+    "GraphNode",
+    "GraphOut",
+    "HealthComponent",
+    "HealthReport",
+    "Page",
+    "PageMeta",
+    "PaperCreate",
+    "PaperChunkOut",
+    "PaperDetail",
+    "PaperOut",
+    "PaperUpdate",
+    "PaperUploadResult",
+    "RetrievalDebug",
+    "RetrievedChunkOut",
+    "TaskOut",
+    "ToolCallRequest",
+    "ToolCallResult",
+    "ToolInfo",
+    "ToolListOut",
+    "TraceRequest",
+    "TraceResult",
+    "TranslateRequest",
+    "TranslateResult",
+    "WriteRequest",
+    "WriteResult",
+    "WritingTemplateOut",
+]

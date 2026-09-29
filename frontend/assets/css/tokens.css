@@ -1,0 +1,118 @@
+/* ============================================================================
+ * 设计 token —— 取自 awesome-design-md 的 linear.app/DESIGN.md（frontmatter 数值直接搬）
+ *
+ * 借的是设计语言，不是商标：没有 Linear 的字体文件、logo、文案。
+ *
+ * 主题策略：**暗色是本源**（DESIGN.md 的 canvas 是 #010102，整份规范只发暗色）。
+ * 浅色那套是按同一套层级关系推导的 —— DESIGN.md 的 Known Gaps 里明说它不发浅色，
+ * 所以这里的浅色值是本地的，不冒充官方值。
+ *
+ * 颜色只在"暗色块 + 浅色块"两处出现，组件里一律 var(--rc-*)。换主题 = 换一组值。
+ * ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 表面阶梯：canvas → surface-1/2/3，靠层级不靠阴影 ---- */
+  --rc-canvas: #010102;
+  --rc-surface-1: #0f1011;
+  --rc-surface-2: #141516;
+  --rc-surface-3: #18191a;
+
+  /* ---- 分隔线 ---- */
+  --rc-hairline: #23252a;
+  --rc-hairline-strong: #34343a;
+  --rc-hairline-tertiary: #3e3e44;
+
+  /* ---- 文字 ---- */
+  --rc-ink: #f7f8f8;
+  --rc-ink-muted: #d0d6e0;
+  --rc-ink-subtle: #8a8f98;
+  --rc-ink-tertiary: #62666d;
+
+  /* ---- 唯一强调色：Linear lavender-blue ---- */
+  --rc-primary: #5e6ad2;
+  --rc-primary-hover: #828fff;
+  --rc-primary-focus: #5e69d1;
+  --rc-on-primary: #ffffff;
+  --rc-primary-soft: rgb(94 106 210 / 14%);
+
+  /* ---- 语义色：官网只发 success；工具界面还需要失败/警告态，是本地的 ---- */
+  --rc-success: #27a644;
+  --rc-danger: #d9544f;
+  --rc-warn: #cf9b3f;
+  --rc-success-soft: rgb(39 166 68 / 14%);
+  --rc-danger-soft: rgb(217 84 79 / 14%);
+  --rc-warn-soft: rgb(207 155 63 / 14%);
+
+  --rc-selection: rgb(94 106 210 / 30%);
+  --rc-scrim: rgb(0 0 0 / 62%);
+
+  /* ---- 圆角：DESIGN.md 的 scale，锁死不让组件自己发挥 ---- */
+  --rc-radius-xs: 4px;
+  --rc-radius-sm: 6px;
+  --rc-radius-md: 8px;
+  --rc-radius-lg: 12px;
+  --rc-radius-xl: 16px;
+  --rc-radius-pill: 9999px;
+
+  /* ---- 间距：4px 基数 ---- */
+  --rc-space-xxs: 4px;
+  --rc-space-xs: 8px;
+  --rc-space-sm: 12px;
+  --rc-space-md: 16px;
+  --rc-space-lg: 24px;
+  --rc-space-xl: 32px;
+  --rc-space-xxl: 48px;
+
+  /* ---- 字体：Linear 的自有字族不公开分发，用 DESIGN.md 自己给的 fallback 栈 ---- */
+  --rc-font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display",
+    "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --rc-font-text: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --rc-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+
+  /* ---- 深度：暗色下不用投影，用 1px 顶部高光 + 表面提升 ---- */
+  --rc-lift: inset 0 1px 0 rgb(255 255 255 / 6%);
+  --rc-shadow-pop: 0 16px 48px rgb(0 0 0 / 55%);
+  --rc-ring: 0 0 0 2px rgb(94 105 209 / 50%);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --rc-canvas: #fbfbfc;
+  --rc-surface-1: #ffffff;
+  --rc-surface-2: #f5f6f6;
+  --rc-surface-3: #eceef0;
+
+  --rc-hairline: #e4e7ea;
+  --rc-hairline-strong: #d3d7dc;
+  --rc-hairline-tertiary: #c3c8ce;
+
+  --rc-ink: #16171a;
+  --rc-ink-muted: #3d4046;
+  --rc-ink-subtle: #6b6f76;
+  --rc-ink-tertiary: #969aa1;
+
+  /* 同一个 lavender，浅底上压深一档才够 4.5:1 */
+  --rc-primary: #4f59c4;
+  --rc-primary-hover: #5e6ad2;
+  --rc-primary-focus: #3f4ab0;
+  --rc-on-primary: #ffffff;
+  --rc-primary-soft: rgb(79 89 196 / 10%);
+
+  --rc-success: #1d8c39;
+  --rc-danger: #c0392f;
+  --rc-warn: #a87418;
+  --rc-success-soft: rgb(29 140 57 / 12%);
+  --rc-danger-soft: rgb(192 57 47 / 12%);
+  --rc-warn-soft: rgb(168 116 24 / 12%);
+
+  --rc-selection: rgb(94 106 210 / 22%);
+  --rc-scrim: rgb(20 22 26 / 42%);
+
+  --rc-lift: inset 0 1px 0 rgb(255 255 255 / 80%);
+  --rc-shadow-pop: 0 16px 48px rgb(20 22 26 / 16%);
+  --rc-ring: 0 0 0 2px rgb(79 89 196 / 45%);
+}

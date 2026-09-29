@@ -1,0 +1,202 @@
+name: research-copilot
+
+# 共享环境：backend 用 .env 注入（无 Redis / 无 worker —— 长任务在 backend 进程内跑）
+x-backend-env: &backend-env
+  ENV: ${ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ${POSTGRES_USER:-copilot}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot_pass}
+  POSTGRES_DB: ${POSTGRES_DB:-research_copilot}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-copilot}:${POSTGRES_PASSWORD:-copilot_pass}@postgres:5432/${POSTGRES_DB:-research_copilot}
+  MILVUS_HOST: milvus
+  MILVUS_PORT: "19530"
+  MILVUS_COLLECTION: ${MILVUS_COLLECTION:-papers}
+  MILVUS_DENSE_DIM: ${MILVUS_DENSE_DIM:-1024}
+  RRF_K: ${RRF_K:-60}
+  # MinerU：镜像默认**不装**（torch + 版面模型多几个 GB）。装了真 MinerU 的机器
+  # 把 MINERU_ENABLED 打开；没装时 /health 会显示 mineru 不可用，解析自动降级 PyMuPDF。
+  MINERU_ENABLED: ${MINERU_ENABLED:-true}
+  MINERU_CMD: ${MINERU_CMD:-mineru}
+  MINERU_METHOD: ${MINERU_METHOD:-auto}
+  MINERU_DEVICE: ${MINERU_DEVICE:-cpu}
+  MINERU_TIMEOUT: ${MINERU_TIMEOUT:-600}
+  MINERU_EXTRA_ARGS: ${MINERU_EXTRA_ARGS:-}
+  LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+  LLM_MODEL_PLANNER: ${LLM_MODEL_PLANNER:-deepseek-chat}
+  LLM_MODEL_EXECUTOR: ${LLM_MODEL_EXECUTOR:-deepseek-chat}
+  EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-modelscope}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+  MODELSCOPE_CACHE: /models
+  RERANKER_ENABLED: ${RERANKER_ENABLED:-true}
+  RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+  CRAG_ENABLED: ${CRAG_ENABLED:-true}
+  GROUNDING_MIN_RATIO: ${GROUNDING_MIN_RATIO:-0.8}
+  MCP_TIMEOUT: ${MCP_TIMEOUT:-60}
+  SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+  NCBI_API_KEY: ${NCBI_API_KEY:-}
+  TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+  SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
+
+services:
+  # ---------------- 关系库 ----------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: rc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-copilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-research_copilot}
+    ports:
+      - "${POSTGRES_PORT_HOST:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-copilot} -d ${POSTGRES_DB:-research_copilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [rc-net]
+
+  # ---------------- Milvus standalone 依赖：etcd ----------------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: rc-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd -advertise-client-urls=http://etcd:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [rc-net]
+
+  # ---------------- Milvus standalone 依赖：minio ----------------
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: rc-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [rc-net]
+
+  # ---------------- 向量库 ----------------
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: rc-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET:-milvus-bucket}
+      COMMON_STORAGETYPE: minio
+    ports:
+      - "${MILVUS_PORT_HOST:-19530}:19530"
+      - "${MILVUS_METRICS_PORT_HOST:-9091}:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks: [rc-net]
+
+  # ---------------- 后端 API ----------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_MINERU: ${INSTALL_MINERU:-false}
+    container_name: rc-backend
+    restart: unless-stopped
+    environment: *backend-env
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # 开发期把代码挂进来，改完即生效（生产去掉这两行）
+      - ./backend:/app
+      - models_cache:/models
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    networks: [rc-net]
+
+  # ---------------- 前端 ----------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rc-frontend
+    restart: unless-stopped
+    environment:
+      NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:8000/api/v1}
+      NUXT_PUBLIC_SSE_BASE: ${NUXT_PUBLIC_SSE_BASE:-http://localhost:8000/api/v1}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_started
+    networks: [rc-net]
+
+volumes:
+  postgres_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  models_cache:
+
+networks:
+  rc-net:
+    driver: bridge

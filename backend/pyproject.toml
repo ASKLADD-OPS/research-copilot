@@ -1,0 +1,127 @@
+[project]
+name = "research-copilot-backend"
+version = "1.0.0"
+description = "Research Copilot —— 多智能体学术研究助手后端"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+
+dependencies = [
+    # ---- Web ----
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "python-multipart>=0.0.20",
+    "sse-starlette>=2.2",              # SSE 流式（chat 接口）
+
+    # ---- 关系库 ----
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "greenlet>=3.1",                   # async SQLAlchemy 需要
+
+    # ---- 配置与校验 ----
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+
+    # ---- 向量库 ----
+    "pymilvus>=2.4.9",
+
+    # ---- Agent 编排 ----
+    "langchain>=0.3.13",
+    "langchain-core>=0.3.28",
+    "langchain-community>=0.3.13",
+    "langgraph>=0.4",
+    "langchain-mcp-adapters>=0.0.5",
+    "langgraph-checkpoint-postgres>=2.0",   # 生产 Checkpointer
+    "langgraph-checkpoint-sqlite>=2.0",     # 测试用，免 Postgres
+
+    # ---- MCP ----
+    "mcp[cli]>=1.2",
+    "fastmcp>=2.0",
+    "fastapi-mcp>=0.3",                     # 把 FastAPI 端点零配置暴露为 MCP 工具
+
+    # ---- LLM ----
+    "openai>=1.30",
+    "tiktoken>=0.8",
+
+    # ---- RAG / Embedding ----
+    "sentence-transformers>=3.3",
+    "modelscope>=1.20",
+    "FlagEmbedding>=1.3.3",                 # bge-m3 的 learned sparse 只能从这里拿（ST 拿不到稀疏头）
+    "rank-bm25>=0.2.2",                     # 可选稀疏后备（bge-m3 sparse 为主）
+
+    # ---- 文档解析 ----
+    "pymupdf>=1.25",
+    "pypdf>=5.1",
+    "pdfplumber>=0.11",
+    "unstructured>=0.16",                   # 轻量版；重解析器（OCR/版面）见 compose profile
+
+    # ---- 图论 ----
+    "networkx>=3.4",
+
+    # ---- 工具 ----
+    "httpx>=0.28",
+    "tenacity>=9.0",
+    "loguru>=0.7",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "orjson>=3.10",
+]  # 无 Celery / Redis：长任务由 app/indexing/runner.py 在进程内线程池执行
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "respx>=0.22",                          # mock httpx
+]
+# 首选解析器。默认**不装**：torch + 版面模型权重好几个 GB，装完还会让镜像体积翻倍。
+# 推荐单独 venv 装，然后把 MINERU_CMD 指到那个 venv 的 mineru(.exe)。
+#   pip install -e ".[mineru]"
+mineru = [
+    "mineru[core]>=2.1",
+]
+# 重解析器备选：仅当语料含扫描件、且不想上 MinerU 时安装
+heavy = [
+    "unstructured[all-docs]>=0.16",
+    "paddleocr>=2.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM"]
+ignore = [
+    "E501",      # 行宽交给 formatter，中文注释按显示宽度算不准
+    "B008",      # FastAPI 的 Depends() 默认参数是惯用法
+    "ASYNC109",  # 工具的 timeout 是对外契约的一部分（MCP 工具签名），不是漏改
+    "UP046",     # 保留 Generic[T] 写法：显式、可读，且不依赖 pydantic>=2.9 的 PEP 695 支持
+    "UP047",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]                        # 测试里允许 assert
+
+[tool.pytest.ini_options]
+# 注意：不要在 addopts 里写 -q —— 命令行再传 -q 会叠成 -qq，把 "N passed" 摘要行吞掉
+addopts = "--strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "unit: 纯逻辑，无网络无外部服务",
+    "integration: 需要 Postgres / Milvus",
+    "e2e: 全链路",
+    "e2e_smoke: 冒烟",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

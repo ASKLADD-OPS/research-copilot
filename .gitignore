@@ -1,0 +1,45 @@
+# ---- 密钥与本地配置 ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.sqlite3
+
+# ---- Node / Nuxt ----
+node_modules/
+.nuxt/
+.output/
+.nitro/
+.cache/
+dist/
+*.log
+.pnpm-store/
+
+# ---- 模型与数据缓存（体积大，不入库）----
+models_cache/
+data/
+uploads/
+*.pdf
+!docs/**/*.pdf
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Milvus 落盘数据（若在本地起过）----
+volumes/
