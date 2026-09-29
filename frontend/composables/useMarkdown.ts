@@ -56,7 +56,7 @@ export function decorateCitations(root: HTMLElement, verified?: Set<number>): vo
         const n = Number(part.trim())
         if (!Number.isFinite(n)) continue
         const span = document.createElement('span')
-        span.className = 'rc-cite-mark' + (verified && !verified.has(n) ? ' unverified' : '')
+        span.className = 'cite-mark' + (verified && !verified.has(n) ? ' is-unverified' : '')
         span.dataset.marker = String(n)
         span.textContent = `[${n}]`
         frag.appendChild(span)

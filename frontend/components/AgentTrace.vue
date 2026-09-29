@@ -1,294 +1,161 @@
 <script setup lang="ts">
 /**
- * Agent 过程面板：意图 → 计划 → 工具时间线 → 反思 → 护栏。
+ * Agent 运行轨迹。读 chat store 而不是收 props：它是这一轮"实时状态"的视图，
+ * 而实时状态只存在于 store 里（回合结束后只有答案与引用会被固化到消息上，轨迹本身不留）。
  *
- * 这些数据在回合结束后仍保留（见 stores/chat.ts），所以历史消息回看时
- * 能看到"当时是怎么查的"，而不只是结论。默认折叠，因为它是佐证不是正文。
+ * 默认折叠。理由是它每轮都出现但只在出问题时才需要看 —— 常驻展开会把对话
+ * 挤成一行字，而"为什么这么答"的需求是偶发的、强烈的（那时才展开）。
  */
-import { PhCaretRight } from '@phosphor-icons/vue'
-import type { PlanStep, Reflection } from '~/types/api'
-import type { ToolTraceItem } from '~/stores/chat'
+import {
+  PhCaretDown,
+  PhCaretRight,
+  PhGauge,
+  PhListChecks,
+  PhShieldWarning,
+  PhTarget,
+  PhWrench,
+} from '@phosphor-icons/vue'
 
-const props = withDefaults(
-  defineProps<{
-    intent?: { intent: string; confidence: number } | null
-    plan?: PlanStep[]
-    tools?: ToolTraceItem[]
-    reflections?: Reflection[]
-    guardrails?: { action: string; flags: string[] }[]
-    replanNote?: string
-    clarifyQuestion?: string
-    latencyMs?: number | null
-    groundingRatio?: number | null
-    streaming?: boolean
-  }>(),
-  {
-    intent: null,
-    plan: () => [],
-    tools: () => [],
-    reflections: () => [],
-    guardrails: () => [],
-    replanNote: '',
-    clarifyQuestion: '',
-    latencyMs: null,
-    groundingRatio: null,
-    streaming: false,
-  },
-)
-
+const chat = useChatStore()
 const open = ref(false)
 
-/** 有内容才显示入口 —— 空面板比没有面板更糟。 */
-const hasAnything = computed(
-  () =>
-    Boolean(props.intent) ||
-    props.plan.length > 0 ||
-    props.tools.length > 0 ||
-    props.reflections.length > 0 ||
-    props.guardrails.length > 0 ||
-    Boolean(props.replanNote) ||
-    Boolean(props.clarifyQuestion),
-)
-
-const summary = computed(() => {
-  const bits: string[] = []
-  if (props.intent) bits.push(props.intent.intent)
-  if (props.tools.length) bits.push(`${props.tools.length} 次工具`)
-  if (props.reflections.length) bits.push(`${props.reflections.length} 轮反思`)
-  if (props.latencyMs != null) bits.push(`${(props.latencyMs / 1000).toFixed(1)}s`)
-  return bits.join(' · ')
-})
-
-const DIMENSIONS = ['faithfulness', 'relevance', 'coherence', 'completeness'] as const
-const DIM_LABEL: Record<string, string> = {
+const DIM_LABEL = {
   faithfulness: '忠实',
   relevance: '相关',
   coherence: '连贯',
   completeness: '完整',
-}
+} as const
 
-function dimScore(r: Reflection, key: string): number | null {
-  const v = r.scores?.[key as keyof NonNullable<Reflection['scores']>]
-  return typeof v === 'number' ? v : null
-}
+type Dim = keyof typeof DIM_LABEL
+const DIMS = Object.keys(DIM_LABEL) as Dim[]
 
-/** 分数用 0–1 还是 0–10 由后端决定，两种都遇过；>1 就当十分制显示。 */
-function dimText(v: number | null): string {
-  if (v == null) return '—'
-  return v > 1 ? v.toFixed(1) : v.toFixed(2)
-}
+const lastReflection = computed(() => chat.reflections.at(-1) ?? null)
 
-function dimPct(v: number | null): number {
-  if (v == null) return 0
-  return Math.max(0, Math.min(100, (v > 1 ? v / 10 : v) * 100))
-}
+const summary = computed(() => {
+  const bits: string[] = []
+  if (chat.intent) {
+    bits.push(`${INTENT_LABEL[chat.intent.intent] ?? chat.intent.intent} ${(chat.intent.confidence * 100).toFixed(0)}%`)
+  }
+  if (chat.plan.length) bits.push(`${chat.plan.length} 步`)
+  if (chat.tools.length) bits.push(`${chat.tools.length} 次工具`)
+  if (lastReflection.value?.overall != null) bits.push(`反思 ${lastReflection.value.overall.toFixed(2)}`)
+  return bits.join(' · ')
+})
 
-const planStatusClass: Record<string, string> = {
-  done: 'rc-pill--ok',
-  succeeded: 'rc-pill--ok',
-  running: 'rc-pill--primary',
-  failed: 'rc-pill--bad',
-  skipped: 'rc-pill--dim',
+function barTone(v: number) {
+  if (v >= 0.8) return 'bg-ok'
+  if (v >= 0.6) return 'bg-warn'
+  return 'bg-bad'
 }
 </script>
 
 <template>
-  <section v-if="hasAnything" class="trace">
-    <button class="trace-head" type="button" :aria-expanded="open" @click="open = !open">
-      <PhCaretRight class="caret" :class="{ open }" :size="12" weight="bold" />
-      <span class="rc-eyebrow">推理过程</span>
-      <span class="rc-mono rc-muted rc-truncate">{{ summary }}</span>
-      <span v-if="streaming" class="rc-dot rc-dot--live" aria-label="进行中" />
+  <div v-if="chat.hasTrace" class="rounded-lg border border-hairline bg-surface">
+    <button
+      type="button"
+      class="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left"
+      @click="open = !open"
+    >
+      <component :is="open ? PhCaretDown : PhCaretRight" :size="11" class="shrink-0 text-ink-4" />
+      <span class="shrink-0 text-2xs font-medium text-ink-3">Agent 轨迹</span>
+      <span class="min-w-0 flex-1 truncate text-2xs text-ink-4">{{ summary }}</span>
+      <span
+        v-if="chat.groundingRatio != null"
+        :class="pillCls(groundingTone(chat.groundingRatio))"
+        title="有据率：回答中被检索上下文支撑的比例，≥0.8 才算通过"
+      >
+        有据率 {{ (chat.groundingRatio * 100).toFixed(0) }}%
+      </span>
     </button>
 
-    <div v-if="open" class="trace-body">
-      <div v-if="intent" class="block">
-        <span class="block-key">意图</span>
-        <div class="block-val">
-          <span class="rc-pill rc-pill--primary">{{ intent.intent }}</span>
-          <span class="rc-mono rc-muted">置信 {{ (intent.confidence * 100).toFixed(0) }}%</span>
+    <div v-if="open" class="space-y-2.5 border-t border-hairline px-2.5 py-2">
+      <!-- 歧义追问：意图置信度低于阈值时 Agent 会先问回来 -->
+      <div v-if="chat.clarifyQuestion" class="rounded-md bg-warn-soft px-2 py-1.5 text-2xs text-warn">
+        <b>需要澄清：</b>{{ chat.clarifyQuestion }}
+      </div>
+
+      <div v-if="chat.plan.length">
+        <div class="mb-1 flex items-center gap-1.5 text-2xs font-medium text-ink-3">
+          <PhListChecks :size="11" />
+          计划
         </div>
+        <ol class="space-y-0.5">
+          <li v-for="(s, i) in chat.plan" :key="i" class="flex items-start gap-1.5 text-2xs leading-relaxed">
+            <span class="mt-px w-4 shrink-0 text-right tabular-nums text-ink-4">{{ i + 1 }}</span>
+            <span class="min-w-0 flex-1 text-ink-2">{{ s.goal || '（无描述）' }}</span>
+            <span v-if="s.tool" :class="pillCls('default')">{{ s.tool }}</span>
+            <span v-if="s.status" class="shrink-0 text-ink-4">{{ s.status }}</span>
+          </li>
+        </ol>
       </div>
 
-      <div v-if="clarifyQuestion" class="block">
-        <span class="block-key">澄清追问</span>
-        <div class="block-val">{{ clarifyQuestion }}</div>
+      <div v-if="chat.tools.length">
+        <div class="mb-1 flex items-center gap-1.5 text-2xs font-medium text-ink-3">
+          <PhWrench :size="11" />
+          工具调用
+        </div>
+        <ul class="space-y-0.5">
+          <li v-for="(t, i) in chat.tools" :key="i" class="flex items-center gap-1.5 text-2xs">
+            <span
+              class="size-1.5 shrink-0 rounded-full"
+              :class="t.status === 'running' ? 'bg-brand' : 'bg-ok'"
+            />
+            <span class="font-mono text-ink-2">{{ t.name }}</span>
+            <span v-if="t.detail" class="min-w-0 flex-1 truncate text-ink-4">{{ t.detail }}</span>
+          </li>
+        </ul>
       </div>
 
-      <div v-if="replanNote" class="block">
-        <span class="block-key">重规划</span>
-        <div class="block-val rc-muted">{{ replanNote }}</div>
-      </div>
-
-      <div v-if="plan.length" class="block">
-        <span class="block-key">计划</span>
-        <ol class="block-val plan">
-          <li v-for="(s, i) in plan" :key="i">
-            <span class="rc-mono rc-dim">{{ s.step ?? i + 1 }}</span>
-            <span class="rc-grow">{{ s.goal || s.tool || '（未命名步骤）' }}</span>
-            <span v-if="s.tool" class="rc-pill rc-pill--dim">{{ s.tool }}</span>
-            <span v-if="s.status" class="rc-pill" :class="planStatusClass[s.status] || 'rc-pill--dim'">
-              {{ s.status }}
+      <!-- 反思：4 维打分。低于阈值会触发 refine，这里要能看出是哪一维拖后腿 -->
+      <div v-if="lastReflection">
+        <div class="mb-1 flex items-center gap-1.5 text-2xs font-medium text-ink-3">
+          <PhGauge :size="11" />
+          反思（第 {{ (lastReflection.round ?? 0) + 1 }} 轮）
+          <span v-if="lastReflection.verdict" :class="pillCls('default')">{{ lastReflection.verdict }}</span>
+        </div>
+        <div class="space-y-1">
+          <div v-for="d in DIMS" :key="d" class="flex items-center gap-2">
+            <span class="w-8 shrink-0 text-2xs text-ink-4">{{ DIM_LABEL[d] }}</span>
+            <span class="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-sunken">
+              <span
+                class="block h-full rounded-full"
+                :class="barTone(lastReflection.scores?.[d] ?? 0)"
+                :style="{ width: `${(lastReflection.scores?.[d] ?? 0) * 100}%` }"
+              />
             </span>
-          </li>
-        </ol>
-      </div>
-
-      <div v-if="tools.length" class="block">
-        <span class="block-key">工具</span>
-        <ol class="block-val plan">
-          <li v-for="(t, i) in tools" :key="i">
-            <span class="rc-dot" :class="t.status === 'running' ? 'rc-dot--live' : 'rc-dot--ok'" />
-            <span class="rc-mono">{{ t.name }}</span>
-            <span v-if="t.detail" class="rc-muted rc-truncate rc-grow">{{ t.detail }}</span>
-          </li>
-        </ol>
-      </div>
-
-      <div v-if="reflections.length" class="block">
-        <span class="block-key">反思</span>
-        <div class="block-val reflect">
-          <div v-for="(r, i) in reflections" :key="i" class="reflect-round">
-            <div class="rc-row">
-              <span class="rc-mono rc-dim">第 {{ r.round ?? i + 1 }} 轮</span>
-              <span v-if="r.verdict" class="rc-pill" :class="r.verdict === 'pass' ? 'rc-pill--ok' : 'rc-pill--warn'">
-                {{ r.verdict }}
-              </span>
-              <span class="rc-spacer" />
-              <span v-if="r.overall != null" class="rc-mono">{{ dimText(r.overall) }}</span>
-            </div>
-            <div class="dims">
-              <div v-for="d in DIMENSIONS" :key="d" class="dim">
-                <span class="rc-caption">{{ DIM_LABEL[d] }}</span>
-                <span class="meter" :style="{ width: `${dimPct(dimScore(r, d))}%` }" />
-                <span class="rc-mono rc-dim">{{ dimText(dimScore(r, d)) }}</span>
-              </div>
-            </div>
-            <p v-if="r.critique" class="critique">{{ r.critique }}</p>
+            <span class="w-7 shrink-0 text-right text-2xs tabular-nums text-ink-3">
+              {{ ((lastReflection.scores?.[d] ?? 0) * 100).toFixed(0) }}
+            </span>
           </div>
         </div>
+        <p v-if="lastReflection.critique" class="mt-1 text-2xs leading-relaxed text-ink-4">
+          {{ lastReflection.critique }}
+        </p>
       </div>
 
-      <div v-if="guardrails.length" class="block">
-        <span class="block-key">护栏</span>
-        <div class="block-val plan">
-          <div v-for="(g, i) in guardrails" :key="i" class="rc-row">
-            <span class="rc-pill" :class="g.action === 'block' ? 'rc-pill--bad' : 'rc-pill--warn'">{{ g.action }}</span>
-            <span class="rc-muted rc-truncate">{{ g.flags.join(' · ') }}</span>
-          </div>
+      <div v-if="chat.replanNote" class="flex items-start gap-1.5 text-2xs text-ink-3">
+        <PhTarget :size="11" class="mt-px shrink-0" />
+        <span>重规划：{{ chat.replanNote }}</span>
+      </div>
+
+      <div v-if="chat.guardrails.length" class="space-y-1">
+        <div
+          v-for="(g, i) in chat.guardrails"
+          :key="i"
+          class="rounded-md bg-warn-soft px-2 py-1.5 text-2xs text-warn"
+        >
+          <span class="inline-flex items-center gap-1.5">
+            <PhShieldWarning :size="11" />
+            <b>{{ g.action }}</b>
+            <span v-if="g.flags.length">{{ g.flags.join(' / ') }}</span>
+          </span>
         </div>
       </div>
 
-      <div v-if="groundingRatio != null" class="block">
-        <span class="block-key">有据率</span>
-        <div class="block-val rc-row">
-          <span class="rc-mono">{{ (groundingRatio * 100).toFixed(1) }}%</span>
-          <span class="rc-muted">（阈值 80%，低于则标注低置信）</span>
-        </div>
-      </div>
+      <p class="border-t border-hairline pt-1.5 text-2xs text-ink-4">
+        <span v-if="chat.latencyMs != null">{{ (chat.latencyMs / 1000).toFixed(1) }}s</span>
+        <span v-if="Object.keys(chat.usage).length"> · {{ chat.usage.total_tokens ?? 0 }} tok</span>
+      </p>
     </div>
-  </section>
+  </div>
 </template>
-
-<style scoped>
-.trace {
-  margin-top: 10px;
-  border: 1px solid var(--rc-hairline);
-  border-radius: var(--rc-radius-md);
-  background: var(--rc-surface-1);
-  overflow: hidden;
-}
-
-.trace-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 10px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-}
-.trace-head:hover {
-  background: var(--rc-surface-2);
-}
-.caret {
-  color: var(--rc-ink-tertiary);
-  transition: transform 0.14s ease;
-  flex: 0 0 auto;
-}
-.caret.open {
-  transform: rotate(90deg);
-}
-
-.trace-body {
-  padding: 4px 10px 10px;
-  border-top: 1px solid var(--rc-hairline);
-}
-
-.block {
-  display: grid;
-  grid-template-columns: 62px 1fr;
-  gap: 10px;
-  padding: 7px 0;
-}
-.block + .block {
-  border-top: 1px solid var(--rc-hairline);
-}
-.block-key {
-  font-size: 11.5px;
-  color: var(--rc-ink-tertiary);
-  padding-top: 2px;
-}
-.block-val {
-  min-width: 0;
-  font-size: 12.5px;
-  color: var(--rc-ink-muted);
-}
-
-.plan {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.plan li {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-}
-
-.reflect-round + .reflect-round {
-  margin-top: 9px;
-  padding-top: 9px;
-  border-top: 1px dashed var(--rc-hairline);
-}
-.dims {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 14px;
-  margin-top: 6px;
-}
-.dim {
-  display: grid;
-  grid-template-columns: 34px 1fr 34px;
-  align-items: center;
-  gap: 6px;
-}
-/* 只有填充条、没有底色轨道 —— 有轨道的进度条是仪表盘噪音 */
-.meter {
-  height: 3px;
-  border-radius: var(--rc-radius-pill);
-  background: var(--rc-primary);
-}
-.critique {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--rc-ink-tertiary);
-  line-height: 1.6;
-}
-</style>

@@ -1,273 +1,125 @@
 <script setup lang="ts">
 /**
- * 对话页。
+ * 工作台。整个应用只有这一个页面 —— 文献库 / 阅读器（或引文图谱）/ 右栏工作区
+ * 三列并排，中间两条分割线可拖拽、可折叠。
  *
- * 布局：会话列表 | 消息流 | 引用原文抽屉。
- * 引用角标 / 引用卡片点开右边抽屉，直接用 PDF.js 跳到那一页 ——
- * "可核查"要能一键落到原文，否则溯源就只是展示用的数字。
+ * 为什么做成单页而不是五个路由：这个产品的核心动作是"看着原文提问"，
+ * 跨页跳转会把原文、选中范围、上下文全部丢掉。ponder 讲的"一站式空间"
+ * 说的就是这件事。
  */
-import { PhPlus, PhTrash } from '@phosphor-icons/vue'
-import type { Citation } from '~/types/api'
+import { PANEL_BOUNDS } from '~/stores/ui'
 
-const chat = useChatStore()
-const papers = usePapersStore()
 const ui = useUiStore()
+const library = useLibraryStore()
+const selection = useSelectionStore()
 
-const scroller = ref<HTMLElement | null>(null)
+// 折叠时留一条 46px 的竖条，而不是 0 —— 完全消失的面板没法再点开
+const COLLAPSED_W = 46
 
-// ---------------- 引用 → 原文抽屉 ----------------
-const drawer = reactive({
-  open: false,
-  paperId: '',
-  page: null as number | null,
-  quote: '',
-  title: '',
-})
-
-function openCitation(c: Citation) {
-  drawer.paperId = c.paper_id
-  drawer.page = c.page_start ?? null
-  drawer.quote = c.quote || ''
-  drawer.title = c.title || ''
-  drawer.open = true
-}
-
-const pdfUrl = computed(() => (drawer.paperId ? papers.pdfUrl(drawer.paperId) : ''))
-
-// ---------------- 滚动到底 ----------------
-function scrollToBottom() {
-  nextTick(() => {
-    const el = scroller.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
-}
-
-watch(() => chat.messages.length, scrollToBottom)
-watch(() => chat.answer, scrollToBottom)
-
-/** 流式中的那条 assistant 消息：内容来自 store.answer，不是 messages 里的。 */
-const streamingMessage = computed(() => {
-  if (!chat.sending) return null
-  return {
-    id: 'streaming',
-    role: 'assistant' as const,
-    content: chat.answer,
-    citations: [] as Citation[],
-    grounding_ratio: chat.groundingRatio,
-  }
-})
-
-const live = computed(() =>
-  chat.sending
-    ? {
-        intent: chat.intent,
-        plan: chat.plan,
-        tools: chat.tools,
-        reflections: chat.reflections,
-        guardrails: chat.guardrails,
-        replanNote: chat.replanNote,
-        clarifyQuestion: chat.clarifyQuestion,
-        latencyMs: chat.latencyMs,
-      }
-    : null,
+const libraryWidth = computed(() =>
+  ui.layout.library.collapsed ? COLLAPSED_W : ui.layout.library.size,
 )
+const workWidth = computed(() => (ui.layout.work.collapsed ? COLLAPSED_W : ui.layout.work.size))
 
-async function onSend(query: string, paperIds: string[]) {
-  await chat.send(query, paperIds)
+/**
+ * 全局快捷键。
+ * 输入框里敲字时一律不响应 —— 否则在搜索框里打 cmd+b 会把文献库收起来。
+ */
+function onKeydown(e: KeyboardEvent) {
+  const target = e.target as HTMLElement | null
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+    return
+  }
+  if (!(e.metaKey || e.ctrlKey)) return
+  switch (e.key.toLowerCase()) {
+    case 'b':
+      e.preventDefault()
+      ui.togglePanel('library')
+      break
+    case 'j':
+      e.preventDefault()
+      ui.togglePanel('work')
+      break
+    case '1':
+      e.preventDefault()
+      ui.setMainView('reader')
+      break
+    case '2':
+      e.preventDefault()
+      ui.setMainView('graph')
+      break
+  }
 }
 
-onMounted(async () => {
-  await Promise.all([chat.loadConversations(), papers.load()])
+onMounted(() => {
+  ui.restoreLayout()
+  window.addEventListener('keydown', onKeydown)
+  void ui.refreshHealth()
+  void ui.loadTasks()
+})
+
+onBeforeUnmount(() => {
+  if (import.meta.client) window.removeEventListener('keydown', onKeydown)
+  library.stopAllPolling()
 })
 </script>
 
 <template>
-  <div class="chat-page">
-    <!-- 会话列表 -->
-    <aside class="sessions rc-panel">
-      <div class="rc-panel-head">
-        <b class="rc-panel-title rc-grow">会话</b>
-        <button class="rc-btn rc-btn--ghost rc-btn--icon rc-btn--sm" type="button" title="新对话" @click="chat.newConversation()">
-          <PhPlus :size="13" />
-        </button>
+  <div class="flex h-screen flex-col overflow-hidden bg-canvas">
+    <AppTopBar />
+
+    <div class="flex min-h-0 flex-1">
+      <!-- 左：文献库 -->
+      <div
+        class="shrink-0 overflow-hidden border-r border-hairline bg-surface"
+        :style="{ width: `${libraryWidth}px` }"
+      >
+        <LibraryPanel :collapsed="ui.layout.library.collapsed" @toggle="ui.togglePanel('library')" />
       </div>
 
-      <div class="sessions-body rc-scroll">
-        <button
-          v-for="c in chat.conversations"
-          :key="c.id"
-          type="button"
-          class="session"
-          :class="{ active: chat.activeId === c.id }"
-          @click="chat.openConversation(c.id)"
-        >
-          <span class="session-title rc-truncate">{{ c.title || '未命名会话' }}</span>
-          <span class="session-foot">
-            <span class="rc-caption">{{ c.message_count }} 条</span>
-            <span class="rc-spacer" />
-            <span
-              class="session-del"
-              role="button"
-              tabindex="0"
-              title="删除会话"
-              @click.stop="chat.removeConversation(c.id)"
-              @keydown.enter.stop="chat.removeConversation(c.id)"
-            >
-              <PhTrash :size="11" />
-            </span>
-          </span>
-        </button>
+      <SplitHandle
+        :model-value="ui.layout.library.size"
+        :min="PANEL_BOUNDS.library[0]"
+        :max="PANEL_BOUNDS.library[1]"
+        side="left"
+        :collapsed="ui.layout.library.collapsed"
+        label="文献库宽度"
+        @update:model-value="ui.setPanelSize('library', $event)"
+        @toggle="ui.togglePanel('library')"
+      />
 
-        <div v-if="chat.loadingConversations" class="skeletons">
-          <span v-for="i in 5" :key="i" class="rc-skeleton" style="height: 34px" />
-        </div>
-        <div v-else-if="!chat.conversations.length" class="rc-empty">还没有历史会话</div>
+      <!-- 中：阅读器 / 引文图谱。min-w-0 是必须的，否则 flex 子项不会收缩，
+           左栏一拖宽就会把右侧整块挤出屏幕 -->
+      <main class="min-w-0 flex-1 bg-surface">
+        <ReaderPanel v-if="ui.layout.mainView === 'reader'" />
+        <GraphPanel v-else />
+      </main>
+
+      <SplitHandle
+        :model-value="ui.layout.work.size"
+        :min="PANEL_BOUNDS.work[0]"
+        :max="PANEL_BOUNDS.work[1]"
+        side="right"
+        :collapsed="ui.layout.work.collapsed"
+        label="右栏宽度"
+        @update:model-value="ui.setPanelSize('work', $event)"
+        @toggle="ui.togglePanel('work')"
+      />
+
+      <!-- 右：对话 / 检视 / 写作 / 工具 -->
+      <div
+        class="shrink-0 overflow-hidden border-l border-hairline bg-surface"
+        :style="{ width: `${workWidth}px` }"
+      >
+        <WorkPanel :collapsed="ui.layout.work.collapsed" @toggle="ui.togglePanel('work')" />
       </div>
-    </aside>
+    </div>
 
-    <!-- 消息流 -->
-    <section class="stream rc-panel">
-      <div ref="scroller" class="stream-body rc-scroll">
-        <div v-if="!chat.messages.length && !chat.sending" class="rc-empty welcome">
-          <strong>问一个问题，或让 Agent 自己去查</strong>
-          <span>
-            检索链路：bge-m3 双向量召回 → RRF 融合 → 重排 → CRAG 判级。
-            回答里的每个 [n] 都指向检索到的原文片段，NLI 校验不过的会标红。
-          </span>
-        </div>
-
-        <ChatMessage
-          v-for="m in chat.messages"
-          :key="m.id"
-          :message="m"
-          :citations="m.citations"
-          :verified-markers="chat.verifiedMarkers"
-          @open-citation="openCitation"
-        />
-
-        <ChatMessage
-          v-if="streamingMessage"
-          :message="streamingMessage"
-          :citations="chat.citations"
-          :live="live"
-          streaming
-          :verified-markers="chat.verifiedMarkers"
-          @open-citation="openCitation"
-        />
-
-        <p v-if="chat.errorMessage" class="rc-alert rc-alert--bad notice">{{ chat.errorMessage }}</p>
-      </div>
-
-      <div class="stream-foot">
-        <ChatComposer
-          :sending="chat.sending"
-          :papers="papers.items"
-          @send="onSend"
-          @stop="chat.abortStream()"
-        />
-      </div>
-    </section>
-
-    <!-- 引用原文 -->
-    <Drawer :open="drawer.open" :title="drawer.title || '引用原文'" @close="drawer.open = false">
-      <div v-if="drawer.paperId" class="drawer-body">
-        <ClientOnly>
-          <PdfViewer :url="pdfUrl" :target-page="drawer.page" :highlight-quote="drawer.quote" />
-          <template #fallback><div class="rc-empty">正在加载阅读器…</div></template>
-        </ClientOnly>
-      </div>
-    </Drawer>
+    <AppStatusBar />
   </div>
+
+  <!-- 划词后给屏幕阅读器一个提示；视觉上的反馈在阅读器底部的动作条上 -->
+  <p class="sr-only" aria-live="polite">
+    {{ selection.latestSelection ? `已选中：${selection.latestSelection.text.slice(0, 40)}` : '' }}
+  </p>
 </template>
-
-<style scoped>
-.chat-page {
-  display: grid;
-  grid-template-columns: 216px 1fr;
-  gap: 12px;
-  padding: 12px;
-  height: 100vh;
-}
-
-.sessions {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.sessions-body {
-  flex: 1;
-  padding: 6px;
-}
-
-.session {
-  display: block;
-  width: 100%;
-  padding: 7px 9px;
-  border: none;
-  border-left: 2px solid transparent;
-  border-radius: var(--rc-radius-sm);
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.session:hover {
-  background: var(--rc-surface-2);
-}
-.session.active {
-  background: var(--rc-primary-soft);
-  border-left-color: var(--rc-primary);
-}
-.session-title {
-  display: block;
-}
-.session-foot {
-  display: flex;
-  align-items: center;
-  margin-top: 2px;
-}
-.session-del {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: var(--rc-radius-xs);
-  color: var(--rc-ink-tertiary);
-}
-.session-del:hover {
-  color: var(--rc-danger);
-  background: var(--rc-danger-soft);
-}
-
-.skeletons {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.stream {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.stream-body {
-  flex: 1;
-  padding: 18px 20px 6px;
-}
-.stream-foot {
-  padding: 6px 20px 12px;
-  border-top: 1px solid var(--rc-hairline);
-}
-
-.notice {
-  margin: 8px 0 0;
-}
-
-.welcome {
-  min-height: 60%;
-  gap: 10px;
-}
-
-.drawer-body {
-  height: 100%;
-}
-</style>

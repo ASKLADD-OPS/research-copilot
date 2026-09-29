@@ -1,37 +1,35 @@
 <script setup lang="ts">
 /**
- * 对话框。Teleport 到 body + 手写遮罩。
+ * 模态框：Teleport 到 body + 遮罩 + Esc 关闭 + 锁滚动。
  *
- * 没用原生 `<dialog>`：它的 `::backdrop` 跟自定义过渡配合很别扭，Esc 也要额外接管。
- * 这里自己收：Esc 关、点遮罩关、打开时锁 body 滚动、焦点移进面板。
- *
- * ponytail: 没做焦点陷阱 —— 这些弹窗里最多两三个表单控件，锁滚动 + 自动聚焦
- * 已经够用；等出现"Tab 能跑到背景页面"的真实投诉再引 focus-trap。
+ * 用原生 `<dialog>` 本来更省事，但它的 ::backdrop 无法做毛玻璃、
+ * 且 `showModal()` 的焦点陷阱在 SSR 下有 hydration 时序问题。这里自己实现反而更短。
  */
-const props = withDefaults(defineProps<{ open: boolean; title?: string; width?: string }>(), {
-  title: '',
-  width: '',
-})
+import { PhX } from '@phosphor-icons/vue'
 
-const emit = defineEmits<{ close: [] }>()
+const props = withDefaults(
+  defineProps<{ modelValue: boolean; title: string; width?: string; closeOnBackdrop?: boolean }>(),
+  { width: '460px', closeOnBackdrop: true },
+)
 
-const panel = ref<HTMLElement | null>(null)
+const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') emit('close')
+function close() {
+  emit('update:modelValue', false)
 }
 
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') close()
+}
+
+// 挂载期间锁 body 滚动：不锁的话滚轮会穿透到下面的文献列表，模态框里反而不能滚
 watch(
-  () => props.open,
+  () => props.modelValue,
   (open) => {
     if (!import.meta.client) return
     document.body.style.overflow = open ? 'hidden' : ''
-    if (open) {
-      window.addEventListener('keydown', onKeydown)
-      void nextTick(() => panel.value?.focus())
-    } else {
-      window.removeEventListener('keydown', onKeydown)
-    }
+    if (open) window.addEventListener('keydown', onKeydown)
+    else window.removeEventListener('keydown', onKeydown)
   },
 )
 
@@ -44,36 +42,44 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <Transition name="rc-fade">
-      <div v-if="open" class="rc-scrim" @click="emit('close')" />
-    </Transition>
-
-    <Transition name="rc-pop">
+    <Transition
+      enter-active-class="transition duration-120"
+      enter-from-class="opacity-0"
+      leave-active-class="transition duration-100"
+      leave-to-class="opacity-0"
+    >
       <div
-        v-if="open"
-        ref="panel"
-        class="rc-modal"
+        v-if="modelValue"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-ink/25 p-4 pt-[12vh] backdrop-blur-[2px]"
         role="dialog"
         aria-modal="true"
-        :aria-label="title || '对话框'"
-        tabindex="-1"
-        :style="width ? { width } : undefined"
+        @click.self="closeOnBackdrop && close()"
       >
-        <header class="rc-overlay-head">
-          <h2 class="rc-panel-title rc-grow">{{ title }}</h2>
-          <slot name="head-extra" />
-          <button class="rc-btn rc-btn--ghost rc-btn--icon rc-btn--sm" type="button" aria-label="关闭" @click="emit('close')">
-            <slot name="close-icon">✕</slot>
-          </button>
-        </header>
+        <div
+          class="w-full max-w-full overflow-hidden rounded-xl border border-hairline bg-surface shadow-lg"
+          :style="{ width }"
+        >
+          <header class="flex h-10 items-center gap-2 border-b border-hairline px-3">
+            <h3 class="truncate text-[13px] font-semibold text-ink">{{ title }}</h3>
+            <span class="flex-1" />
+            <button
+              type="button"
+              class="grid size-6 place-items-center rounded-sm text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+              aria-label="关闭"
+              @click="close"
+            >
+              <PhX :size="13" />
+            </button>
+          </header>
 
-        <div class="rc-overlay-body rc-scroll" style="padding: 14px">
-          <slot />
+          <div class="max-h-[62vh] overflow-y-auto scroll-slim p-3">
+            <slot />
+          </div>
+
+          <footer v-if="$slots.footer" class="flex items-center justify-end gap-2 border-t border-hairline px-3 py-2.5">
+            <slot name="footer" />
+          </footer>
         </div>
-
-        <footer v-if="$slots.footer" class="rc-overlay-foot">
-          <slot name="footer" />
-        </footer>
       </div>
     </Transition>
   </Teleport>

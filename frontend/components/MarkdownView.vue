@@ -38,8 +38,8 @@ watch([html, verifiedSet], () => nextTick(refresh))
 <template>
   <div
     ref="root"
-    class="rc-md"
-    :class="{ 'rc-caret': streaming }"
+    class="md-body"
+    :class="{ 'md-caret': streaming }"
     v-html="html"
   />
 </template>

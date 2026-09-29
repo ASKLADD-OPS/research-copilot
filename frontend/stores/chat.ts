@@ -1,11 +1,5 @@
-import type {
-  ChatMessage,
-  Citation,
-  Conversation,
-  ConversationDetail,
-  PlanStep,
-  Reflection,
-} from '~/types/api'
+import type { ChatMessage, Citation, Conversation, ConversationDetail, IntentKind, PlanStep, Reflection } from '~/types/api'
+import type { ReaderSelection } from '~/types/workbench'
 
 export interface ToolTraceItem {
   name: string
@@ -13,12 +7,32 @@ export interface ToolTraceItem {
   detail?: string
 }
 
+/** 挂在输入框上的"引文上下文"。由阅读器划词产生，发送时明确拼进问句。 */
+export interface PendingQuote {
+  paperId: string
+  paperTitle: string
+  page: number
+  text: string
+}
+
+/** 意图 → 中文短名。列表面板与状态栏都要用，所以放 store 里只写一遍。 */
+export const INTENT_LABEL: Record<IntentKind, string> = {
+  single_paper_qa: '单篇问答',
+  cross_paper_reasoning: '跨篇推理',
+  literature_search: '文献检索',
+  graph_analysis: '图谱分析',
+  writing_assist: '写作辅助',
+  visualization: '可视化',
+  translation: '翻译',
+  chitchat: '闲聊',
+}
+
 /**
  * 对话状态机。
  *
  * 一个回合的生命周期：`sending = true` → 收 SSE 事件逐项填 live 状态 →
  * `done`/`error` 收尾。live 状态（intent/plan/tools/citations/reflections）
- * 在回合结束后**保留**在最后一条 assistant 消息上，这样回看历史也能看到
+ * 在回合结束后**固化到最后一条 assistant 消息上**，这样回看历史还能看到
  * "当时是怎么查的"，而不是只剩一段结论。
  */
 export const useChatStore = defineStore('chat', () => {
@@ -35,7 +49,7 @@ export const useChatStore = defineStore('chat', () => {
   const sending = ref(false)
   const errorMessage = ref('')
   const clarifyQuestion = ref('')
-  const intent = ref<{ intent: string; confidence: number } | null>(null)
+  const intent = ref<{ intent: IntentKind; confidence: number } | null>(null)
   const plan = ref<PlanStep[]>([])
   const tools = ref<ToolTraceItem[]>([])
   const citations = ref<Citation[]>([])
@@ -46,10 +60,22 @@ export const useChatStore = defineStore('chat', () => {
   const usage = ref<Record<string, number>>({})
   const latencyMs = ref<number | null>(null)
 
-  const stream = useChatStream()
-
   /** 本轮回答正文。单独拎出来是为了让 token 追加只改一个字符串，避免整表重渲染。 */
   const answer = ref('')
+
+  /** 输入框上的引文上下文。 */
+  const quote = ref<PendingQuote | null>(null)
+
+  const stream = useChatStream()
+
+  const hasTrace = computed(
+    () =>
+      Boolean(intent.value) ||
+      plan.value.length > 0 ||
+      tools.value.length > 0 ||
+      reflections.value.length > 0 ||
+      guardrails.value.length > 0,
+  )
 
   function resetTurn() {
     errorMessage.value = ''
@@ -77,16 +103,32 @@ export const useChatStore = defineStore('chat', () => {
     tools.value.push(item)
   }
 
+  // ---------------------------------------------------------------- 引文上下文
+
+  function attachQuote(sel: ReaderSelection, paperTitle: string) {
+    quote.value = {
+      paperId: sel.paperId,
+      paperTitle,
+      page: sel.page,
+      text: sel.text,
+    }
+  }
+
+  function clearQuote() {
+    quote.value = null
+  }
+
   // ---------------------------------------------------------------- 会话 CRUD
+
   async function loadConversations() {
     const api = useApi()
     loadingConversations.value = true
     try {
-      const page = await api.get<{ items: Conversation[] }>('/chat/conversations', {
+      const res = await api.get<{ items: Conversation[] }>('/chat/conversations', {
         page: 1,
         page_size: 50,
       })
-      conversations.value = page?.items ?? []
+      conversations.value = res?.items ?? []
     } catch (err) {
       errorMessage.value = (err as Error).message
     } finally {
@@ -95,11 +137,10 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function openConversation(id: string) {
-    const api = useApi()
     abortStream()
     loadingMessages.value = true
     try {
-      const detail = await api.get<ConversationDetail>(`/chat/conversations/${id}`)
+      const detail = await useApi().get<ConversationDetail>(`/chat/conversations/${id}`)
       activeId.value = detail.id
       messages.value = detail.messages ?? []
       resetTurn()
@@ -115,38 +156,55 @@ export const useChatStore = defineStore('chat', () => {
     activeId.value = null
     messages.value = []
     resetTurn()
+    clearQuote()
   }
 
   async function removeConversation(id: string) {
-    const api = useApi()
-    await api.del(`/chat/conversations/${id}`)
+    await useApi().del<Record<string, unknown>>(`/chat/conversations/${id}`)
     conversations.value = conversations.value.filter((c) => c.id !== id)
     if (activeId.value === id) newConversation()
   }
 
   // ---------------------------------------------------------------- 发问
-  async function send(query: string, paperIds: string[] = []) {
-    const text = query.trim()
-    if (!text || sending.value) return
+
+  /**
+   * 发一问。
+   *
+   * 引文上下文不是偷偷塞进请求体的：它被**明文拼进问句**，用户在输入框里
+   * 能看到自己到底问的是什么。后端 ChatRequest 只有 query/conversation_id/
+   * paper_ids/intent 四个字段，硬加一个 quote 字段就得同时改 schema、图状态与
+   * prompt —— 为了一个前端展示问题不值得。
+   */
+  async function send(text: string, paperIds: string[] = []) {
+    const body = text.trim()
+    if (!body || sending.value) return
 
     resetTurn()
     sending.value = true
 
-    const userMsg: ChatMessage = {
+    const q = quote.value
+    const composed = q
+      ? `以下是我在《${q.paperTitle}》第 ${q.page} 页选中的原文：\n\n> ${q.text.replace(/\n/g, '\n> ')}\n\n${body}`
+      : body
+
+    messages.value.push({
       id: `local-user-${Date.now()}`,
       role: 'user',
-      content: text,
+      content: composed,
       citations: [],
-    }
-    messages.value.push(userMsg)
+    })
+    clearQuote()
+
+    // 附带引文时把范围收到那一篇：选了原文却去全库检索，答非所问的概率很高
+    const scope = q ? [q.paperId] : paperIds
 
     await stream.start(
-      { query: text, conversation_id: activeId.value, paper_ids: paperIds },
+      { query: composed, conversation_id: activeId.value, paper_ids: scope },
       {
         onEvent: (evt) => {
           switch (evt.event) {
             case 'intent': {
-              const d = evt.data as { intent: string; confidence: number }
+              const d = evt.data as { intent: IntentKind; confidence: number }
               intent.value = { intent: d.intent, confidence: d.confidence }
               break
             }
@@ -172,9 +230,7 @@ export const useChatStore = defineStore('chat', () => {
               break
             case 'citation': {
               const cite = evt.data as Citation
-              const dup = citations.value.some(
-                (c) => c.marker === cite.marker && c.chunk_id === cite.chunk_id,
-              )
+              const dup = citations.value.some((c) => c.marker === cite.marker && c.chunk_id === cite.chunk_id)
               if (!dup) citations.value.push(cite)
               break
             }
@@ -212,12 +268,10 @@ export const useChatStore = defineStore('chat', () => {
           answer.value ||= '（本次回答失败，未产生内容）'
         },
         onClose: () => {
-          // 把这一轮的实时状态固化到消息上，历史回看时还在
-          const md = answer.value
           messages.value.push({
             id: `local-assistant-${Date.now()}`,
             role: 'assistant',
-            content: md,
+            content: answer.value,
             intent: intent.value?.intent ?? null,
             citations: citations.value.slice(),
             grounding_ratio: groundingRatio.value,
@@ -246,7 +300,6 @@ export const useChatStore = defineStore('chat', () => {
   )
 
   return {
-    // 列表
     conversations,
     activeId,
     loadingConversations,
@@ -254,10 +307,10 @@ export const useChatStore = defineStore('chat', () => {
     openConversation,
     newConversation,
     removeConversation,
-    // 消息
+
     messages,
     loadingMessages,
-    // 回合实时状态
+
     sending,
     errorMessage,
     clarifyQuestion,
@@ -272,9 +325,14 @@ export const useChatStore = defineStore('chat', () => {
     usage,
     latencyMs,
     answer,
+    hasTrace,
     citationByMarker,
     verifiedMarkers,
-    // 动作
+
+    quote,
+    attachQuote,
+    clearQuote,
+
     send,
     abortStream,
     resetTurn,
