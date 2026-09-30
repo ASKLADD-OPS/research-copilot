@@ -136,9 +136,18 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
 
 def route_after_execute(state: AgentState) -> str:
-    """还有步骤就继续 executor；否则进 reflector 评审。"""
+    """还有步骤就继续 executor；否则交给 replanner —— 由它决定 re-plan 还是转 reflector 评审。
+
+    注意：这里**不能**直接返回 "reflector"。graph.py 里 executor 的边表只声明了
+    `{"executor", "replanner"}`，LangGraph 会把未声明的返回值当成 KeyError 抛出：
+        File "langgraph/graph/_branch.py", line 203, in _finish
+            r if isinstance(r, Send) else self.ends[r] for r in result
+        KeyError: 'reflector'
+    改这一行之前，所有走 Planner 的意图（writing_assist / translation / visualization）
+    都在第一轮执行完就崩，SSE 只吐得出 error 帧。
+    """
     plan = state.get("plan") or []
-    return "executor" if state.get("current_step", 0) < len(plan) else "reflector"
+    return "executor" if state.get("current_step", 0) < len(plan) else "replanner"
 
 
 __all__ = ["current_step", "executor_node", "parse_action", "route_after_execute"]

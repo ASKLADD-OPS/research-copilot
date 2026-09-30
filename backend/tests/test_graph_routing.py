@@ -125,7 +125,9 @@ def test_executor_loops_until_plan_exhausted():
     plan = [{"goal": "a"}, {"goal": "b"}, {"goal": "c"}]
     assert route_after_execute({"plan": plan, "current_step": 0}) == "executor"
     assert route_after_execute({"plan": plan, "current_step": 1}) == "executor"
-    assert route_after_execute({"plan": plan, "current_step": 3}) == "reflector"
+    # 计划跑完交给 replanner（它再决定 re-plan 还是转 reflector），不是直接进 reflector。
+    # 直接返回 "reflector" 会让 LangGraph 在边表里查不到目标而抛 KeyError。
+    assert route_after_execute({"plan": plan, "current_step": 3}) == "replanner"
 
 
 @pytest.mark.unit
@@ -249,3 +251,69 @@ def test_direct_tools_set_matches_registry_expectations():
     """直连工具必须是本地/远程**都真实存在**的名字，否则会路由到空节点。"""
     assert "retrieve_papers" not in DIRECT_TOOLS  # 检索有专门节点，不在直连集合里
     assert {"arxiv_search", "pubmed_search", "semantic_scholar_search", "python_exec"} <= DIRECT_TOOLS
+
+
+# ---------------------------------------------------------------- 边表契约
+@pytest.mark.unit
+def test_every_router_output_is_declared_in_the_edge_table():
+    """路由器返回的名字必须真的出现在该源节点的条件边表里。
+
+    这是一个**只在 runtime 才会炸**的坑：LangGraph 拿路由函数的返回值去查边表，
+    查不到直接抛 `KeyError`（`langgraph/graph/_branch.py` 的 `self.ends[r]`），
+    整轮 SSE 只剩一帧 error。上面的逐个断言抓不到它 —— 它们验证的是"路由器返回了
+    什么"，而不是"图认不认这个名字"。
+
+    实际踩过：`route_after_execute` 返回 `"reflector"`，但 executor 的边表只声明了
+    `{"executor", "replanner"}` —— 于是 writing_assist / translation / visualization
+    这些走 Planner 的意图，第一轮执行完就崩。
+
+    例外：reflector 的路由函数返回的是判定名（refine），边表里 "refine" 映射到 executor，
+    所以它不适用"返回值即节点名"这条，由 test_reflect_refines_only_when_verdict_says_so 单独覆盖。
+    """
+    from app.agents.graph import build_graph
+
+    declared: dict[str, set[str]] = {}
+    for e in build_graph(with_checkpointer=False).get_graph().edges:
+        declared.setdefault(e.source, set()).add(e.target)
+
+    two_steps = [{"goal": "a"}, {"goal": "b"}]
+    cases = [
+        (
+            "intent",
+            route_after_intent,
+            [{}, {"confidence": 0.9, "intent": "literature_search"}, {"confidence": 0.95, "intent": "chitchat"}],
+        ),
+        (
+            "planner",
+            route_after_planner_plan,
+            [
+                {},
+                {"plan": [{"tool": "arxiv_search"}]},
+                {"plan": [{"tool": "retrieve_papers"}]},
+                {"plan": [{"tool": "some_new_tool"}]},
+            ],
+        ),
+        (
+            "retriever",
+            route_after_retrieve,
+            [{"plan": two_steps, "current_step": 1}, {"plan": two_steps[:1], "current_step": 1}],
+        ),
+        ("tool", route_after_tool, [{"plan": two_steps, "current_step": 1}, {"plan": two_steps, "current_step": 2}]),
+        (
+            "executor",
+            route_after_execute,
+            [{"plan": two_steps, "current_step": 0}, {"plan": two_steps, "current_step": 2}],
+        ),
+        (
+            "replanner",
+            route_after_replan,
+            [{"plan": two_steps, "current_step": 0}, {"plan": two_steps, "current_step": 2}],
+        ),
+    ]
+    for source, router, states in cases:
+        for state in states:
+            got = router(state)
+            assert got in declared[source], (
+                f"{router.__name__} 返回 {got!r}，但 {source} 的边表只有 {sorted(declared[source])} —— "
+                f"LangGraph 会在 runtime 抛 KeyError，请改路由函数或补边表"
+            )
