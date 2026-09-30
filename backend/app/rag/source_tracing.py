@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections.abc import Sequence
@@ -166,24 +167,43 @@ class TraceReport:
 class SourceTracer:
     """把生成结果对齐回检索上下文。"""
 
-    def __init__(self, *, nli_threshold: float = 0.6) -> None:
+    def __init__(
+        self,
+        *,
+        nli_threshold: float = 0.6,
+        enable_nli: bool = True,
+        nli_model: str = "cross-encoder/nli-deberta-v3-base",
+    ) -> None:
         self.nli_threshold = nli_threshold
+        self._enable_nli = enable_nli
+        self._nli_model = nli_model
         self._nli: Any = None
-        self._nli_checked = False
+        # enable_nli=False 直接标记"已检查完毕、没有模型"，让下游一律走词法代理
+        self._nli_checked = not enable_nli
         self._lock = threading.Lock()
 
     @property
     def nli(self) -> Any | None:
-        """可选的真 NLI 模型（cross-encoder）。没装/加载失败则返回 None，用词法代理。"""
+        """可选的真 NLI 模型（cross-encoder）。没装/加载失败则返回 None，用词法代理。
+
+        `enable_nli=False` 是给**离线场景**（单测、CI、无外网部署）用的硬开关，
+        与"装了但加载失败"不同：后者会先真去拉一次权重，网络不通时表现为长时间
+        挂起而不是抛错，`except` 兜不住。
+        """
         if self._nli_checked:
             return self._nli
         with self._lock:
             if not self._nli_checked:
                 self._nli_checked = True
                 try:
+                    # 下载超时必须有：huggingface_hub 默认无下载超时，网络被墙/代理
+                    # 半通时这里会**永久挂住**。设了上限，拉不到才会变成异常 → 降级。
+                    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "8")
+                    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "8")
+
                     from sentence_transformers import CrossEncoder
 
-                    self._nli = CrossEncoder("cross-encoder/nli-deberta-v3-base", max_length=512)
+                    self._nli = CrossEncoder(self._nli_model, max_length=512)
                     logger.info("已加载 NLI 模型，蕴含验证升级为模型判断")
                 except Exception as exc:  # noqa: BLE001
                     logger.info("NLI 模型不可用，使用词法蕴含代理：{}", exc)
@@ -240,13 +260,17 @@ class SourceTracer:
                 sentence_supported = sentence_supported or ok
 
                 if m not in cited_markers:
+                    # chunks 表用单值 page，旧结构用 page_start/page_end —— 两种都认，
+                    # 免得溯源链路被"字段改名"这种纯表示层的事故打断。
+                    page = getattr(chunk, "page", None) or getattr(chunk, "page_start", None)
+                    page_end = getattr(chunk, "page_end", None) or page
                     cited_markers[m] = Citation(
                         marker=m,
                         chunk_id=getattr(chunk, "id", ""),
                         paper_id=getattr(chunk, "paper_id", ""),
                         section=getattr(chunk, "section", None),
-                        page_start=getattr(chunk, "page_start", None),
-                        page_end=getattr(chunk, "page_end", None),
+                        page_start=page,
+                        page_end=page_end,
                         nli_score=score,
                         supported=ok,
                         quote=content[:280],

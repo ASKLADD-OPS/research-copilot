@@ -56,12 +56,33 @@ class Settings(BaseSettings):
     MINERU_EXTRA_ARGS: str = ""  # 追加 CLI 参数（-f / -t / -l 等版本差异项从这里补）
 
     # ------------------------------------------------------------------ Milvus
+    # ⚠ 不要把这个配置项叫 MILVUS_URI：那是 pymilvus **自己**读的环境变量名
+    # （`pymilvus.orm.connections.Config.MILVUS_URI`），它要求必须是
+    # `http[s]://host:port` 形式且在 import 期就校验 —— 填本地文件路径会让
+    # `import pymilvus` 直接抛 ConnectionConfigException。
+    # MILVUS_LITE_PATH：填本地文件路径即走 milvus-lite（无需 Docker），
+    # 留空则按 host:port 连 standalone。本机 Docker 被安全策略挡住，开发/验收走前者。
+    MILVUS_LITE_PATH: str = ""
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
-    MILVUS_COLLECTION: str = "papers"
+    # 两个集合各有明确职责，不要合并：
+    #   paper_chunks    —— chunk 级，dense+sparse 混合检索（问答召回）
+    #   paper_summaries —— 论文级，仅 dense（语义去重 + 论文级检索）
+    MILVUS_CHUNKS_COLLECTION: str = "paper_chunks"
+    MILVUS_SUMMARIES_COLLECTION: str = "paper_summaries"
     MILVUS_DENSE_DIM: int = 1024
     MILVUS_METRIC_TYPE: str = "COSINE"
     MILVUS_INDEX_TYPE: str = "HNSW"
+
+    # ------------------------------------------------------------------ Redis
+    # 三库健康检查的第三个依赖。当前**只用于健康检查与后续缓存**：
+    # 项目没有 Celery，队列职责由 app/indexing/runner.py 在进程内承担。
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: str = ""
+    REDIS_URL: str | None = None  # 给了就以它为准（优先级最高）
+    REDIS_CONNECT_TIMEOUT: float = 2.0
 
     # ------------------------------------------------------------------ 检索
     RRF_K: int = 60
@@ -99,10 +120,18 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ Embedding
     EMBEDDING_BACKEND: Literal["modelscope", "local"] = "modelscope"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
-    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_DEVICE: str = "auto"  # auto | cpu | cuda | mps —— auto = 有 GPU 就用
     EMBEDDING_BATCH_SIZE: int = 16
     EMBEDDING_MAX_LENGTH: int = 8192
+    EMBEDDING_SPARSE_TOP_N: int = 256  # 稀疏向量只保留权重最高的 N 个 token
     MODELSCOPE_CACHE: str | None = None
+
+    # ------------------------------------------------------------------ 默认用户
+    # 阶段 1 没有鉴权，但 papers.user_id 必须非空（否则 UNIQUE(user_id, file_hash) 失效）。
+    # 这个账号由 ensure_default_user() 幂等创建，所有匿名写入都挂在它名下。
+    DEFAULT_USER_EMAIL: str = "local@research-copilot.local"
+    DEFAULT_USER_PASSWORD: str = "local-dev-only"
+    DEFAULT_USER_ROLE: str = "admin"
 
     # ------------------------------------------------------------------ MCP
     MCP_TIMEOUT: int = 60
@@ -137,6 +166,14 @@ class Settings(BaseSettings):
     def sync_database_url(self) -> str:
         """同步驱动（Alembic 迁移用）。psycopg3 同一个 driver 名即可。"""
         return self.async_database_url
+
+    @property
+    def redis_url(self) -> str:
+        """Redis 连接串。给了 REDIS_URL 就以它为准。"""
+        if self.REDIS_URL:
+            return self.REDIS_URL
+        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     @property
     def cors_origins(self) -> list[str]:

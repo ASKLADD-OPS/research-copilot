@@ -15,12 +15,15 @@ from app.core.config import settings
 
 # 关键：导入 Base 与全部模型，否则 --autogenerate 生成空迁移
 from app.models import (  # noqa: F401
+    AgentRun,
     Base,  # noqa: F401
-    Conversation,
-    Message,
+    Chunk,
+    Citation,
+    GraphSnapshot,
     Paper,
-    PaperChunk,
-    Task,
+    PaperVersion,
+    QAHistory,
+    User,
 )
 
 config = context.config

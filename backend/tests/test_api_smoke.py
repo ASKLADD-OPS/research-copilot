@@ -20,19 +20,23 @@ EXPECTED_PATHS = {
     "/api/v1/papers/{paper_id}",
     "/api/v1/papers/{paper_id}/reindex",
     "/api/v1/papers/{paper_id}/chunks",
+    "/api/v1/papers/{paper_id}/versions",
     "/api/v1/papers/{paper_id}/file",
     # 问答与溯源
     "/api/v1/qa/ask",
     "/api/v1/qa/retrieve",
     "/api/v1/qa/trace",
-    # 对话（SSE）
+    "/api/v1/qa/history",
+    # 对话（SSE）—— 会话 id 是 agent_runs.session_id，所以路径参数叫 session_id
     "/api/v1/chat/stream",
     "/api/v1/chat/conversations",
-    "/api/v1/chat/conversations/{conv_id}",
+    "/api/v1/chat/conversations/{session_id}",
     # 图谱
     "/api/v1/graph",
     "/api/v1/graph/analyze",
     "/api/v1/graph/rebuild",
+    "/api/v1/graph/snapshots",
+    "/api/v1/graph/snapshots/{snapshot_id}",
     # 写作
     "/api/v1/writing/templates",
     "/api/v1/writing/draft",
@@ -42,6 +46,8 @@ EXPECTED_PATHS = {
     "/api/v1/tools/call",
     # 探针
     "/health",
+    # 阶段 1 验收标准 3：三库状态
+    "/api/v1/health/db",
 }
 
 

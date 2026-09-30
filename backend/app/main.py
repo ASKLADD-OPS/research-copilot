@@ -121,10 +121,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-            logger.info("表结构就绪（AUTO_CREATE_TABLES=true）")
+            logger.info("表结构就绪（AUTO_CREATE_TABLES=true；生产请用 alembic upgrade head）")
         except Exception as exc:  # noqa: BLE001 - 数据库没起也要让服务起来，好让人看到 /health
             logger.warning("建表失败，稍后请手工跑 alembic upgrade head：{}", exc)
 
+    # 默认用户 + Milvus 两个集合。同样尽力而为：Milvus 没起时服务照常可用，
+    # /api/v1/health/db 会如实报 degraded，而不是让进程起不来。
+    try:
+        from app.db.bootstrap import bootstrap
+
+        result = await bootstrap()
+        if result.get("errors"):
+            logger.warning("启动引导有未完成项：{}", result["errors"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("启动引导失败：{}", exc)
+
+    if settings.AUTO_CREATE_TABLES:
         try:
             from app.agents.checkpointer import init_checkpointer_tables
 
@@ -137,6 +149,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    from app.db.redis import aclose as redis_aclose
+
+    await redis_aclose()
     await dispose_engine()
     logger.info("已关闭")
 

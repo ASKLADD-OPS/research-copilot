@@ -7,38 +7,35 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PaperStatus = Literal["pending", "parsing", "indexing", "ready", "failed"]
+#: 与 papers.parsed_status 的取值域一致（见 app.models.paper.Paper）
+PaperStatus = Literal["pending", "parsing", "chunking", "embedding", "ready", "failed"]
+
+ChunkType = Literal["text", "formula", "table", "figure_caption"]
 
 
 class PaperBase(BaseModel):
     title: str = Field(default="", max_length=2000)
     authors: list[dict[str, Any]] = Field(default_factory=list, description="[{name, affiliation}]")
     abstract: str | None = None
-    year: int | None = Field(default=None, ge=1500, le=2200)
-    venue: str | None = Field(default=None, max_length=512)
     doi: str | None = None
     arxiv_id: str | None = None
-    pmid: str | None = None
-    tags: list[str] = Field(default_factory=list)
+    version: str | None = Field(default=None, max_length=16, description="arXiv 版本号，如 v1 / v2")
+    source_url: str | None = Field(default=None, description="论文落地页或下载地址")
 
 
 class PaperCreate(PaperBase):
-    """手工登记一篇论文（已有 PDF 或仅元数据）。"""
-
-    source: Literal["upload", "arxiv", "pubmed", "s2"] = "upload"
+    """手工登记一篇论文（无 PDF，仅元数据）。"""
 
 
 class PaperUpdate(BaseModel):
-    """部分更新，只有非 None 字段生效。"""
+    """部分更新，只有显式给出的字段生效。"""
 
     title: str | None = None
     abstract: str | None = None
-    year: int | None = None
-    venue: str | None = None
     doi: str | None = None
     arxiv_id: str | None = None
-    pmid: str | None = None
-    tags: list[str] | None = None
+    version: str | None = None
+    source_url: str | None = None
 
 
 class PaperOut(PaperBase):
@@ -46,44 +43,59 @@ class PaperOut(PaperBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    source: str
-    status: PaperStatus
-    num_chunks: int = 0
-    page_count: int | None = None
-    file_size: int | None = None
+    id: int
+    user_id: int
+    file_path: str | None = None
+    file_hash: str | None = None
+    semantic_hash: str | None = None
+    parsed_status: PaperStatus
     # 实际生效的解析器（mineru / pymupdf / pdfplumber / pypdf）。
     # 放在列表项里而不是只放详情：MinerU 不可用时会静默降级，
     # 用户在文献库里就该一眼看出这篇到底是谁解析的。
     parser: str | None = None
+    page_count: int | None = None
     error: str | None = None
-    indexed_at: datetime | None = None
     created_at: datetime
-    updated_at: datetime
 
 
 class PaperDetail(PaperOut):
-    """详情：在列表字段之外补上本地文件路径与解析元数据。"""
+    """详情：补上分块数这类派生信息。"""
 
-    pdf_path: str | None = None
-    meta: dict[str, Any] = Field(default_factory=dict)
+    chunk_count: int = 0
 
 
 class PaperUploadResult(BaseModel):
     paper: PaperOut
-    task_id: str | None = Field(
-        default=None,
-        description="后台解析任务 id（进程内执行）；轮询 /tasks/{task_id} 看进度。index=false 时为 null",
+    index_started: bool = Field(
+        default=False,
+        description="是否已排入后台解析。进度改看 papers.parsed_status，轮询 GET /papers/{id}",
     )
 
 
-class PaperChunkOut(BaseModel):
+class ChunkOut(BaseModel):
+    """一个检索单元。`bbox` 是归一化坐标，前端据此在 PDF 上画高亮框。"""
+
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    chunk_index: int
+    id: int
+    paper_id: int
+    section: str | None = None
+    page: int | None = None
+    bbox: Any | None = None
     content: str
-    section_name: str | None = None
-    page_start: int | None = None
-    page_end: int | None = None
     token_count: int = 0
+    chunk_type: ChunkType = "text"
+    created_at: datetime
+
+
+__all__ = [
+    "ChunkOut",
+    "ChunkType",
+    "PaperBase",
+    "PaperCreate",
+    "PaperDetail",
+    "PaperOut",
+    "PaperStatus",
+    "PaperUpdate",
+    "PaperUploadResult",
+]

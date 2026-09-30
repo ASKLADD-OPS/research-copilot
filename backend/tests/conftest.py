@@ -47,10 +47,16 @@ def settings():
 
 @pytest.fixture
 def tracer():
-    """干净实例，避免 lru_cache 的全局单例被其他用例改过阈值。"""
+    """干净实例，避免 lru_cache 的全局单例被其他用例改过阈值。
+
+    `enable_nli=False` 是必须的：溯源引擎默认会懒加载一个 cross-encoder NLI 模型，
+    而 `sentence-transformers` 装好之后这一步会**真去 HuggingFace 拉权重**。
+    网络不通时它不是抛错而是长时间挂起（huggingface_hub 默认无下载超时），
+    表现为"单测跑到某个用例就没动静了"。单测只该验证词法代理那条路。
+    """
     from app.rag.source_tracing import SourceTracer
 
-    return SourceTracer()
+    return SourceTracer(enable_nli=False)
 
 
 @pytest.fixture

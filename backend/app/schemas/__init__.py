@@ -7,8 +7,9 @@
 
 from app.schemas.common import CODE_OK, ApiResponse, HealthComponent, HealthReport, Page, PageMeta
 from app.schemas.graph import GraphAnalysisRequest, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut
+from app.schemas.health import DbHealthReport, StoreHealth
 from app.schemas.paper import (
-    PaperChunkOut,
+    ChunkOut,
     PaperCreate,
     PaperDetail,
     PaperOut,
@@ -19,12 +20,13 @@ from app.schemas.qa import (
     AskRequest,
     AskResult,
     CitationOut,
+    QAHistoryOut,
     RetrievalDebug,
     RetrievedChunkOut,
+    SourceSpan,
     TraceRequest,
     TraceResult,
 )
-from app.schemas.task import TaskOut
 from app.schemas.tool import ToolCallRequest, ToolCallResult, ToolInfo, ToolListOut
 from app.schemas.writing import (
     BilingualPair,
@@ -41,7 +43,9 @@ __all__ = [
     "AskRequest",
     "AskResult",
     "BilingualPair",
+    "ChunkOut",
     "CitationOut",
+    "DbHealthReport",
     "GraphAnalysisRequest",
     "GraphAnalysisResult",
     "GraphEdge",
@@ -52,14 +56,15 @@ __all__ = [
     "Page",
     "PageMeta",
     "PaperCreate",
-    "PaperChunkOut",
     "PaperDetail",
     "PaperOut",
     "PaperUpdate",
     "PaperUploadResult",
+    "QAHistoryOut",
     "RetrievalDebug",
     "RetrievedChunkOut",
-    "TaskOut",
+    "SourceSpan",
+    "StoreHealth",
     "ToolCallRequest",
     "ToolCallResult",
     "ToolInfo",

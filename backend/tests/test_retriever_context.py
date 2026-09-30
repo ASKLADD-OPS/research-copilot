@@ -12,15 +12,12 @@ import pytest
 from app.rag.fusion import dedupe_by_id, min_max_normalize, reciprocal_rank_fusion
 from app.rag.retriever import RetrievedChunk, to_context_block
 
+PAPER_ID = 123
+
 
 def mk(index: int, content: str, **kw) -> RetrievedChunk:
-    return RetrievedChunk(
-        id=f"c{index}",
-        paper_id="paper-0123456789",
-        content=content,
-        chunk_index=index,
-        **kw,
-    )
+    """chunk 主键是 int64 —— 与 Milvus 的 `chunk_id` 同一个值。"""
+    return RetrievedChunk(id=index, paper_id=PAPER_ID, content=content, **kw)
 
 
 @pytest.mark.unit
@@ -37,18 +34,20 @@ def test_numbers_start_at_one_and_are_contiguous():
 @pytest.mark.unit
 def test_header_carries_locator_fields():
     """头部要能定位：paper / chunk / section / 页码，缺了就没法回溯原文。"""
-    block = to_context_block([mk(7, "正文", section="Method", page_start=3, page_end=5)])
+    block = to_context_block([mk(7, "正文", section="Method", page=3)])
     head = block.split("\n")[0]
     assert "[1]" in head
-    assert "paper=paper-01" in head
+    assert f"paper={PAPER_ID}" in head
     assert "chunk=7" in head
     assert "section=Method" in head
-    assert "p.3-5" in head
+    assert "p.3" in head
 
 
 @pytest.mark.unit
-def test_single_page_omits_range():
-    block = to_context_block([mk(0, "正文", page_start=4, page_end=4)])
+def test_page_is_rendered_once():
+    """chunks.page 是单值。头部不能出现页码重复（早期 page_start/page_end 双值时
+    同页会渲染成 "p.4-4"）。"""
+    block = to_context_block([mk(0, "正文", page=4)])
     assert "p.4" in block
     assert "p.4-4" not in block
 
@@ -123,18 +122,18 @@ def test_citation_whitelist_is_exactly_the_numbering():
 def test_fusion_output_feeds_context_in_rank_order():
     """端到端小验证：RRF 的名次 → 上下文编号，顺序必须一致。
 
-    dense 路：[c0, c1]；sparse 路：[c1, c2] → c1 被两路召回，融合后第一。
+    dense 路：[1, 2]；sparse 路：[2, 3] → 2 被两路召回，融合后第一。
     """
-    dense = [mk(0, "dense-1"), mk(1, "dense-2")]
-    sparse = [mk(1, "sparse-1"), mk(2, "sparse-2")]
+    dense = [mk(1, "dense-1"), mk(2, "dense-2")]
+    sparse = [mk(2, "sparse-1"), mk(3, "sparse-2")]
     fused = [c for c, _ in reciprocal_rank_fusion([dense, sparse])]
-    assert [c.id for c in fused] == ["c1", "c0", "c2"]
+    assert [c.id for c in fused] == [2, 1, 3]
 
     block = to_context_block(fused)
-    # [1] 必须就是融合后的第一名（c1），且正文顺序与融合名次一致
+    # [1] 必须就是融合后的第一名（id=2），且正文顺序与融合名次一致
     assert block.startswith("[1] ")
-    assert "dense-2" in block.split("---")[0]  # c1 的内容
-    assert block.index("dense-2") < block.index("dense-1")  # c1 排在 c0 之前
+    assert "dense-2" in block.split("---")[0]  # id=2 的内容
+    assert block.index("dense-2") < block.index("dense-1")  # id=2 排在 id=1 之前
     assert "[3]" in block
 
     deduped = dedupe_by_id(fused)

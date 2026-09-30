@@ -1,22 +1,52 @@
-"""ORM 模型。导入本模块即完成全部表的注册（Alembic autogenerate 依赖这一点）。"""
+"""ORM 模型 —— 阶段 1 规格的 8 张表。
 
-from app.models.base import Base, TimestampMixin, UUIDMixin, new_uuid
-from app.models.chunk import PaperChunk
-from app.models.conversation import Conversation, Message
-from app.models.paper import Paper, PaperSection
-from app.models.paper_citation import PaperCitation
-from app.models.task import Task
+导入本模块即完成全部表的注册（Alembic autogenerate 与 `create_all` 都依赖这一点）。
+
+    users           账号
+    papers          论文（内容去重 + 版本识别）
+    paper_versions  arXiv 版本谱系
+    chunks          检索与溯源的最小单元
+    citations       引文边
+    qa_history      问答留痕（含 sources 溯源数组）
+    graph_snapshots 引文图快照
+    agent_runs      Agent 轨迹 + 会话聚合键
+"""
+
+from app.models.agent_run import AgentRun
+from app.models.base import Base, CreatedAtMixin, IntPKMixin, TimestampMixin
+from app.models.chunk import CHUNK_TYPES, Chunk
+from app.models.citation import Citation
+from app.models.graph_snapshot import GraphSnapshot
+from app.models.paper import Paper, PaperVersion
+from app.models.qa_history import QAHistory
+from app.models.user import User
+
+#: 规格要求的 8 张表，刻意写死一份 —— 验收脚本与单测直接断言它，
+#: 免得"表建全了吗"这种问题只能靠人肉数。
+SPEC_TABLES = (
+    "users",
+    "papers",
+    "paper_versions",
+    "chunks",
+    "citations",
+    "qa_history",
+    "graph_snapshots",
+    "agent_runs",
+)
 
 __all__ = [
     "Base",
-    "UUIDMixin",
+    "CreatedAtMixin",
+    "IntPKMixin",
     "TimestampMixin",
-    "new_uuid",
+    "SPEC_TABLES",
+    "User",
     "Paper",
-    "PaperSection",
-    "PaperChunk",
-    "PaperCitation",
-    "Conversation",
-    "Message",
-    "Task",
+    "PaperVersion",
+    "Chunk",
+    "CHUNK_TYPES",
+    "Citation",
+    "QAHistory",
+    "GraphSnapshot",
+    "AgentRun",
 ]

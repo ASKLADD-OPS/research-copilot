@@ -229,9 +229,22 @@ def test_threshold_comes_from_settings(tracer, settings):
 @pytest.mark.unit
 def test_report_to_dict_is_json_safe(make_chunk):
     chunks = [make_chunk("c1", "该方法有效。")]
-    report = SourceTracer().trace("该方法有效 [1]。", chunks)
+    report = SourceTracer(enable_nli=False).trace("该方法有效 [1]。", chunks)
     payload = report.to_dict()
     import json
 
     json.dumps(payload)  # 不能有不可序列化的对象
     assert set(payload) >= {"grounding_ratio", "phantom_markers", "citations", "passed"}
+
+
+@pytest.mark.unit
+def test_unit_fixture_never_attempts_nli_download(tracer):
+    """单测里绝不能去拉 cross-encoder 权重。
+
+    这个断言看着像在测实现细节，其实是在挡一类真实事故：
+    `sentence-transformers` 一旦装上，`SourceTracer()` 的懒加载就会真发
+    HuggingFace 请求；huggingface_hub 默认**没有下载超时**，网络半通时
+    不抛错而是挂住，表现为"单测跑到某个用例就不动了"，且很难和死锁区分。
+    """
+    assert tracer._nli_checked is True
+    assert tracer._nli is None

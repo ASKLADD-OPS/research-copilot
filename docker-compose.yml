@@ -1,6 +1,6 @@
 name: research-copilot
 
-# 共享环境：backend 用 .env 注入（无 Redis / 无 worker —— 长任务在 backend 进程内跑）
+# 共享环境：backend 用 .env 注入（无 worker —— 长任务在 backend 进程内跑）
 x-backend-env: &backend-env
   ENV: ${ENV:-development}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -12,9 +12,17 @@ x-backend-env: &backend-env
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-copilot}:${POSTGRES_PASSWORD:-copilot_pass}@postgres:5432/${POSTGRES_DB:-research_copilot}
   MILVUS_HOST: milvus
   MILVUS_PORT: "19530"
-  MILVUS_COLLECTION: ${MILVUS_COLLECTION:-papers}
+  # 两个集合：chunk 级双向量（dense+sparse）、论文级摘要向量（语义去重）
+  MILVUS_CHUNKS_COLLECTION: ${MILVUS_CHUNKS_COLLECTION:-paper_chunks}
+  MILVUS_SUMMARIES_COLLECTION: ${MILVUS_SUMMARIES_COLLECTION:-paper_summaries}
   MILVUS_DENSE_DIM: ${MILVUS_DENSE_DIM:-1024}
   RRF_K: ${RRF_K:-60}
+  # Redis 是「三库」的第三个：不承载任务队列（无 Celery），只做缓存 / 去重标记 /
+  # 限流，所以挂了不影响主链路 —— 但 /health/db 会如实报出来。
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: ${REDIS_DB:-0}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
   # MinerU：镜像默认**不装**（torch + 版面模型多几个 GB）。装了真 MinerU 的机器
   # 把 MINERU_ENABLED 打开；没装时 /health 会显示 mineru 不可用，解析自动降级 PyMuPDF。
   MINERU_ENABLED: ${MINERU_ENABLED:-true}
@@ -63,6 +71,24 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    networks: [rc-net]
+
+  # ---------------- 缓存（三库之三） ----------------
+  redis:
+    image: redis:7-alpine
+    container_name: rc-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT_HOST:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     networks: [rc-net]
 
   # ---------------- Milvus standalone 依赖：etcd ----------------
@@ -169,6 +195,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       milvus:
         condition: service_healthy
     networks: [rc-net]
@@ -192,6 +220,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   etcd_data:
   minio_data:
   milvus_data:

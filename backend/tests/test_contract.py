@@ -93,30 +93,30 @@ def test_page_defaults_to_empty_items():
 def test_paper_out_validates_from_attributes():
     now = datetime.now(UTC)
     row = SimpleNamespace(
-        id="p1",
+        id=1,
+        user_id=1,
         title="A Paper",
         authors=[],
         abstract=None,
-        year=2024,
-        venue="NeurIPS",
         doi=None,
-        arxiv_id=None,
-        pmid=None,
-        tags=["rag"],
-        source="upload",
-        status="ready",
-        num_chunks=12,
+        arxiv_id="2401.00001",
+        version="v2",
+        source_url=None,
+        file_path="/tmp/a.pdf",
+        file_hash="a" * 64,
+        semantic_hash="b" * 64,
+        parsed_status="ready",
+        parser="mineru",
         page_count=9,
-        file_size=1024,
         error=None,
-        indexed_at=now,
         created_at=now,
-        updated_at=now,
     )
     out = PaperOut.model_validate(row)
-    assert out.status == "ready"
-    assert out.num_chunks == 12
-    assert out.tags == ["rag"]
+    assert out.parsed_status == "ready"
+    assert out.id == 1  # 主键是 int64（对齐 Milvus 的 INT64），不再是 UUID 字符串
+    assert out.arxiv_id == "2401.00001"
+    assert out.version == "v2"
+    assert out.file_path == "/tmp/a.pdf"
 
 
 @pytest.mark.unit
@@ -124,7 +124,7 @@ def test_paper_status_is_constrained():
     from app.schemas.paper import PaperStatus
 
     statuses = set(PaperStatus.__args__)
-    assert statuses == {"pending", "parsing", "indexing", "ready", "failed"}
+    assert statuses == {"pending", "parsing", "chunking", "embedding", "ready", "failed"}
 
 
 @pytest.mark.unit
@@ -167,9 +167,10 @@ def test_retrieval_debug_level_is_literal():
 
 @pytest.mark.unit
 def test_retrieved_chunk_preview_default_is_empty():
-    chunk = RetrievedChunkOut(chunk_id="c1", paper_id="p1")
+    chunk = RetrievedChunkOut(chunk_id=1, paper_id=2)
     assert chunk.preview == ""
     assert chunk.sources == []
+    assert chunk.page is None
 
 
 # ---------------------------------------------------------------- 错误码

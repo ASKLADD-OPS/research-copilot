@@ -3,15 +3,23 @@
 调用链
 ------
 query → bge-m3 编码（dense 1024 维 + learned sparse）
-      → Milvus `hybrid_search`（`AnnSearchRequest` × 2 + `RRFRanker(k=60)`）
+      → Milvus `paper_chunks` hybrid_search（`AnnSearchRequest` × 2 + `RRFRanker(k=60)`）
+      → **回 PostgreSQL 补正文**（见下）
       → 若调用方提供了额外召回路（引文图谱 / Web 兜底），用 `reciprocal_rank_fusion` 再融合一次
       → CrossEncoder 重排 → top_k
 
+为什么要回表
+------------
+`paper_chunks` 集合里只存向量与三个 id，不存正文 —— 正文的真源是 `chunks.content`，
+在向量库里再存一份就有两个可写副本，upsert 半途失败时无法判断谁对。
+代价就是这一步：一次 `WHERE id IN (...)`，不是 N+1。换来的是"读到的正文
+一定和 PG 一致"，以及改 chunk 策略后不必重建向量之外的任何东西。
+
 为什么两段式融合而不是一次算完
 ------------------------------
-Milvus 的 `RRFRanker` 只能融合**它自己集合内的字段**。图谱召回（NetworkX 内存图）
+Milvus 的 `RRFRanker` 只能融合**它自己集合内**的两路。图谱召回（NetworkX 内存图）
 和 Web 兜底都不在 Milvus 里，只能在拿到 Milvus 结果后再做一次 RRF。
-两次 RRF 的结果不可直接比较分数，但排序语义是一致的 —— 我们只消费排序。
+两次 RRF 的分数不可直接比较，但排序语义一致 —— 我们只消费排序。
 """
 
 from __future__ import annotations
@@ -20,10 +28,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+from sqlalchemy import select
+
 from app.core.config import settings
-from app.core.logging import logger
 from app.db.milvus import VectorHit, ahybrid_search
+from app.db.session import session_scope
 from app.embeddings.bge_m3 import get_embedder
+from app.models import Chunk
 from app.rag.fusion import dedupe_by_id, reciprocal_rank_fusion
 
 
@@ -31,30 +43,25 @@ from app.rag.fusion import dedupe_by_id, reciprocal_rank_fusion
 class RetrievedChunk:
     """检索链路中流动的统一结构。
 
-    `id` 是 RRF 的融合键，必须稳定 —— 用 chunk 的 UUID（与 Milvus 主键一致）。
+    `id` 是 RRF 的融合键，必须稳定 —— 用 `chunks.id`（也就是 Milvus 的主键）。
     """
 
-    id: str
-    paper_id: str
-    content: str
-    chunk_index: int = 0
+    id: int
+    paper_id: int
+    content: str = ""
     section: str | None = None
-    page_start: int | None = None
-    page_end: int | None = None
+    page: int | None = None
+    bbox: Any | None = None
     score: float = 0.0
     rerank_score: float | None = None
     sources: list[str] = field(default_factory=list)
 
     @classmethod
     def from_vector_hit(cls, hit: VectorHit) -> RetrievedChunk:
+        """只听召回结果，正文留空 —— 由 `_hydrate` 统一回表填。"""
         return cls(
-            id=hit.id,
+            id=hit.chunk_id,
             paper_id=hit.paper_id,
-            content=hit.content,
-            chunk_index=hit.chunk_index,
-            section=hit.section,
-            page_start=hit.page_start,
-            page_end=hit.page_end,
             score=hit.score,
             sources=[hit.source],
         )
@@ -68,18 +75,43 @@ class RetrievedChunk:
             "chunk_id": self.id,
             "paper_id": self.paper_id,
             "section": self.section,
-            "page_start": self.page_start,
-            "page_end": self.page_end,
+            "page": self.page,
+            "bbox": self.bbox,
             "sources": self.sources,
         }
 
 
-def build_paper_filter(paper_ids: Sequence[str] | None) -> str | None:
-    """构造 Milvus 过滤表达式。"""
+def build_paper_filter(paper_ids: Sequence[int] | None) -> str | None:
+    """构造 Milvus 过滤表达式。id 是 int64，**不要加引号** ——
+    加引号在 Milvus 里会被当成字符串字段比较，静默返回空结果。"""
     if not paper_ids:
         return None
-    quoted = ", ".join(f'"{p}"' for p in paper_ids)
-    return f"paper_id in [{quoted}]"
+    return f"paper_id in [{', '.join(str(int(p)) for p in paper_ids)}]"
+
+
+async def hydrate_chunks(chunks: Sequence[RetrievedChunk]) -> list[RetrievedChunk]:
+    """回 PostgreSQL 补正文与定位信息，保持入参顺序。"""
+    ids = [c.id for c in chunks if c.id]
+    if not ids:
+        return list(chunks)
+    async with session_scope() as session:
+        rows = (await session.execute(select(Chunk).where(Chunk.id.in_(ids)))).scalars().all()
+    by_id = {int(r.id): r for r in rows}
+
+    out: list[RetrievedChunk] = []
+    for chunk in chunks:
+        row = by_id.get(chunk.id)
+        if row is None:
+            # 向量在、正文不在 = PG 被清过而 Milvus 没同步。跳过而不是塞空串：
+            # 一个正文为空的 chunk 会让生成侧把 [n] 引到空气上。
+            logger.warning("Milvus 命中 chunk_id={} 但在 PG 中不存在，已跳过（索引不一致？）", chunk.id)
+            continue
+        chunk.content = row.content
+        chunk.section = row.section
+        chunk.page = row.page
+        chunk.bbox = row.bbox
+        out.append(chunk)
+    return out
 
 
 class HybridRetriever:
@@ -90,7 +122,7 @@ class HybridRetriever:
         self,
         query: str,
         *,
-        paper_ids: Sequence[str] | None = None,
+        paper_ids: Sequence[int] | None = None,
         top_k: int | None = None,
         recall_k: int | None = None,
         extra_paths: Sequence[Sequence[RetrievedChunk]] | None = None,
@@ -103,7 +135,7 @@ class HybridRetriever:
 
         emb = self._embedder.encode_query(query)
         if not emb.dense:
-            logger.error("嵌入失败，无法检索")
+            logger.error("嵌入失败，无法检索（embedding 后端可能未就绪）")
             return []
 
         hits = await ahybrid_search(
@@ -125,24 +157,25 @@ class HybridRetriever:
 
         if len(ranked_paths) > 1:
             fused = reciprocal_rank_fusion(ranked_paths, k=settings.RRF_K, weights=weights)
-            merged: list[RetrievedChunk] = []
-            for chunk, score in fused:
-                merged.append(
+            merged = dedupe_by_id(
+                [
                     RetrievedChunk(
                         id=chunk.id,
                         paper_id=chunk.paper_id,
                         content=chunk.content,
-                        chunk_index=chunk.chunk_index,
                         section=chunk.section,
-                        page_start=chunk.page_start,
-                        page_end=chunk.page_end,
+                        page=chunk.page,
+                        bbox=chunk.bbox,
                         score=score,
                         sources=chunk.sources,
                     )
-                )
-            merged = dedupe_by_id(merged)
+                    for chunk, score in fused
+                ]
+            )
         else:
             merged = dedupe_by_id(primary)
+
+        merged = await hydrate_chunks(merged)
 
         if rerank is None:
             rerank = settings.RERANKER_ENABLED
@@ -164,11 +197,11 @@ def to_context_block(chunks: Sequence[RetrievedChunk], *, max_chars: int = 12000
     lines: list[str] = []
     used = 0
     for i, c in enumerate(chunks, start=1):
-        head = f"[{i}] paper={c.paper_id[:8]} chunk={c.chunk_index}"
+        head = f"[{i}] paper={c.paper_id} chunk={c.id}"
         if c.section:
             head += f" section={c.section}"
-        if c.page_start:
-            head += f" p.{c.page_start}" + (f"-{c.page_end}" if c.page_end and c.page_end != c.page_start else "")
+        if c.page:
+            head += f" p.{c.page}"
         block = f"{head}\n{c.content.strip()}\n"
         # `used > 0` 这个条件不能省：没有它就退化成"第一块超限时上下文为空"，
         # 生成侧拿不到任何证据，只会照着问题编 —— 宁可超限，不可空手。
@@ -177,3 +210,6 @@ def to_context_block(chunks: Sequence[RetrievedChunk], *, max_chars: int = 12000
         lines.append(block)
         used += len(block)
     return "\n---\n".join(lines)
+
+
+__all__ = ["HybridRetriever", "RetrievedChunk", "build_paper_filter", "hydrate_chunks", "to_context_block"]

@@ -24,7 +24,10 @@ dependencies = [
     "pydantic-settings>=2.6",
 
     # ---- 向量库 ----
-    "pymilvus>=2.4.9",
+    # 必须 <3：compose 里服务端锁的是 milvusdb/milvus:v2.4.15，pymilvus 3.x 是给
+    # Milvus 3 用的客户端。同时 >=2.5 是硬下限 —— 2.5 起 MilvusClient.create_index
+    # 要求 `IndexParams` 对象，传 2.4 时代的 `list[dict]` 会直接 ParamError。
+    "pymilvus>=2.5,<3",
 
     # ---- Agent 编排 ----
     "langchain>=0.3.13",
@@ -74,7 +77,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "ruff>=0.8",
-    "respx>=0.22",                          # mock httpx
+    "milvus-lite>=2.4",                     # tests/test_milvus_collections.py：起真 Milvus，免 Docker
 ]
 # 首选解析器。默认**不装**：torch + 版面模型权重好几个 GB，装完还会让镜像体积翻倍。
 # 推荐单独 venv 装，然后把 MINERU_CMD 指到那个 venv 的 mineru(.exe)。
@@ -115,12 +118,18 @@ ignore = [
 
 [tool.pytest.ini_options]
 # 注意：不要在 addopts 里写 -q —— 命令行再传 -q 会叠成 -qq，把 "N passed" 摘要行吞掉
-addopts = "--strict-markers"
+#
+# 默认排除 `model`：那批用例会真的加载 bge-m3，首次运行要下约 2GB 权重。
+# 让 `pytest` 这条最常敲的命令有这种副作用是个陷阱。要跑就显式指定：
+#     pytest -m model -s tests/test_embeddings.py
+# 命令行再给一个 -m 会覆盖这里的，不需要 --override-ini。
+addopts = "--strict-markers -m 'not model'"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "unit: 纯逻辑，无网络无外部服务",
     "integration: 需要 Postgres / Milvus",
+    "model: 需要真实加载 bge-m3 权重（慢，依赖 torch + 约 2GB 权重）",
     "e2e: 全链路",
     "e2e_smoke: 冒烟",
 ]

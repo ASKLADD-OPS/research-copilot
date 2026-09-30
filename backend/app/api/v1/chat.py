@@ -2,11 +2,18 @@
 
 SSE 事件协议见 `app.llm.streaming` 模块头（前端 `composables/useChatStream.ts` 按此消费，
 解帧后由 `stores/chat.ts` 分发到 UI）。
-流式实现要点：
-- `graph.astream(..., stream_mode=["updates", "custom"])`：`updates` 给节点级进度，
-  `custom` 给 synthesizer 逐 token 推送的正文；
-- 会话落库**自己开 session**（`session_scope`），不复用请求级依赖 ——
-  流式响应期间请求依赖的生命周期不可靠，用自己的事务最稳。
+
+会话模型（阶段 1 没有 conversations / messages 表）
+---------------------------------------------------
+- **会话** = `agent_runs.session_id`。同一轮对话里的多次提问共享一个 session_id，
+  左侧历史列表就是按它 group by 出来的。
+- **一轮对话的对话内容** = 该 run 的 `steps`：开头一条 `{"node": "user"}`，
+  结尾一条 `{"node": "synthesizer"}` 带答案与引用。
+- **留痕** = `qa_history`（含 sources 溯源数组），供审计与指标统计，不参与会话渲染。
+
+流式落库自己开 session（`session_scope`），不复用请求级依赖 ——
+流式响应期间请求依赖的生命周期不可靠，用自己的事务最稳。落库全程**尽力而为**：
+数据库不可用时答案照常吐出来，这是踩过的坑（详见 MEMORY 的 0c561e9）。
 """
 
 from __future__ import annotations
@@ -24,36 +31,36 @@ from sqlalchemy import delete, func, select
 
 from app.api.deps import PageDep, SessionDep
 from app.core.errors import NotFoundError
+from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
 from app.llm.client import get_llm
 from app.llm.streaming import Event, done_event, error_event, sse, sse_comment
-from app.models import Conversation, Message
+from app.models import AgentRun
 from app.schemas import ApiResponse, Page, PageMeta
 
 router = APIRouter(prefix="/chat", tags=["对话"])
 
+
 # ------------------------------------------------------------------ 本地模型
 # 只在这个模块用，不值得进公共 schemas —— 免得把「流式对话」的概念泄漏到全项目。
-
-
 class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
-    paper_ids: list[str] = Field(default_factory=list)
+    paper_ids: list[int] = Field(default_factory=list)
     intent: str | None = None
 
 
 class ConversationOut(BaseModel):
     id: str
     title: str
-    paper_ids: list[str] = Field(default_factory=list)
-    message_count: int = 0
+    turns: int = 0
+    last_intent: str | None = None
     created_at: Any = None
     updated_at: Any = None
 
 
 class MessageOut(BaseModel):
-    id: str
+    id: int
     role: str
     content: str
     intent: str | None = None
@@ -99,13 +106,9 @@ def _node_events(node: str, update: dict[str, Any]) -> list[tuple[Event, Any]]:
             )
         )
     elif node == "tool":
-        name = next(
-            (str(t.get("tool", "")) for t in (update.get("trace") or []) if t.get("node") == "tool"),
-            "",
-        )
+        name = next((str(t.get("tool", "")) for t in (update.get("trace") or []) if t.get("node") == "tool"), "")
         status = next(
-            (str(t.get("status", "")) for t in (update.get("trace") or []) if t.get("node") == "tool"),
-            "done",
+            (str(t.get("status", "")) for t in (update.get("trace") or []) if t.get("node") == "tool"), "done"
         )
         out.append((Event.TOOL, {"name": name, "status": status}))
     elif node == "replanner":
@@ -129,8 +132,7 @@ def _node_events(node: str, update: dict[str, Any]) -> list[tuple[Event, Any]]:
             out.append((Event.CITATION, cite))
     elif node == "guardrails":
         action = next(
-            (str(t.get("action", "")) for t in (update.get("trace") or []) if t.get("node") == "guardrails"),
-            "",
+            (str(t.get("action", "")) for t in (update.get("trace") or []) if t.get("node") == "guardrails"), ""
         )
         out.append((Event.GUARDRAIL, {"action": action, "flags": update.get("guardrail_flags", [])}))
     return out
@@ -155,16 +157,16 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
 
     started = time.perf_counter()
     merged: dict[str, Any] = {}
-    conv_id = payload.conversation_id
+    session_id = payload.conversation_id or f"chat-{uuid4().hex[:16]}"
 
     yield sse_comment("open")
     try:
-        conv_id = await _prepare_turn(conv_id, payload)
+        run_id = await _open_turn(session_id, payload)
 
         graph = get_graph()
         initial: dict[str, Any] = {
             "query": payload.query,
-            "session_id": conv_id,
+            "session_id": session_id,
             "target_papers": payload.paper_ids,
         }
         if payload.intent:
@@ -172,7 +174,7 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
 
         async for mode, chunk in graph.astream(
             initial,
-            config={"configurable": {"thread_id": conv_id}},
+            config={"configurable": {"thread_id": session_id}},
             stream_mode=["updates", "custom"],
         ):
             if mode == "custom":
@@ -187,7 +189,7 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
                     yield sse(event, data)
 
         latency = int((time.perf_counter() - started) * 1000)
-        await _finish_turn(conv_id, merged, latency)
+        await _close_turn(session_id, run_id, payload, merged, latency)
 
         usage = get_llm().usage
         yield done_event(
@@ -197,152 +199,209 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
             latency_ms=latency,
         )
     except Exception as exc:  # noqa: BLE001 - 任何异常都要以 error 帧收尾，前端才不会卡
-        logger.exception("流式对话失败 conv={}", conv_id)
+        logger.exception("流式对话失败 session={}", session_id)
         yield error_event(5000, f"{type(exc).__name__}: {exc}")
 
 
-# ------------------------------------------------------------------ 历史
-async def _prepare_turn(conv_id: str | None, payload: ChatRequest) -> str:
-    """建会话（如无）+ 落用户消息，返回会话 id。
-
-    持久化是**尽力而为**的：数据库不可用时不能把整轮回答一起废掉。
-    Agent 图自己用的是可降级的 checkpointer（AsyncPostgresSaver → MemorySaver），
-    没有 Postgres 照样能跑出答案 —— 之前这里直接裸写库，导致 DB 一挂，
-    整个 `/chat/stream` 连一个 token 都吐不出来（先抛连接超时，前端只能收到 error 帧）。
-    现在失败只记警告并退化成临时会话。
-    """
+# ------------------------------------------------------------------ 落库
+async def _open_turn(session_id: str, payload: ChatRequest) -> int | None:
+    """建一条 running 的 agent_run，把用户这一问记进 steps。返回 run id（失败返回 None）。"""
     try:
         async with session_scope() as session:
-            conversation: Conversation | None = None
-            if conv_id:
-                conversation = await session.get(Conversation, conv_id)
-            if conversation is None:
-                conversation = Conversation(
-                    title=payload.query[:60],
-                    paper_ids=payload.paper_ids,
-                )
-                session.add(conversation)
-                await session.flush()
-            session.add(Message(conversation_id=conversation.id, role="user", content=payload.query))
-            return conversation.id
-    except Exception as exc:  # noqa: BLE001 - 存储层任何故障都不该中断问答
-        logger.warning("会话落库失败，本轮以临时会话继续：{}", exc)
-        # 复用调用方给的 id（若在），否则现造一个 —— LangGraph 的 thread_id 不能为空
-        return conv_id or f"ephemeral-{uuid4().hex}"
-
-
-async def _finish_turn(conv_id: str, merged: dict[str, Any], latency_ms: int) -> None:
-    """落助手消息（含引用与溯源指标）。同样是尽力而为，失败不抛。"""
-    usage = get_llm().usage
-    reflections = [merged["reflection"]] if merged.get("reflection") else []
-    try:
-        async with session_scope() as session:
-            session.add(
-                Message(
-                    conversation_id=conv_id,
-                    role="assistant",
-                    content=str(merged.get("answer") or ""),
-                    intent=merged.get("intent"),
-                    intent_confidence=merged.get("confidence"),
-                    slot_filling=merged.get("slot_filling") or {},
-                    target_papers=list(merged.get("target_papers") or []),
-                    citations=list(merged.get("citations") or []),
-                    grounding_ratio=merged.get("grounding_ratio"),
-                    unsupported_claims=list(merged.get("unsupported_claims") or []),
-                    reflections=reflections,
-                    plan={"steps": merged.get("plan", [])},
-                    tool_calls=[t for t in merged.get("trace", []) if t.get("node") in {"tool", "retriever"}],
-                    latency_ms=latency_ms,
-                    token_usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
-                )
+            user_id = await ensure_default_user(session)
+            run = AgentRun(
+                user_id=user_id,
+                session_id=session_id,
+                intent=payload.intent,
+                mode="pipeline",
+                status="running",
+                steps=[
+                    {
+                        "node": "user",
+                        "content": payload.query,
+                        "paper_ids": [int(p) for p in payload.paper_ids],
+                    }
+                ],
             )
-            # 首句回答后把默认标题换掉（"新对话" 这种没有信息量）
-            conversation = await session.get(Conversation, conv_id)
-            if conversation is not None and conversation.title in {"", "新对话"}:
-                conversation.title = str(merged.get("answer") or "")[:60] or conversation.title
+            session.add(run)
+            await session.flush()
+            return int(run.id)
+    except Exception as exc:  # noqa: BLE001 - 存储层任何故障都不该中断问答
+        logger.warning("本轮运行记录落库失败，以无痕模式继续：{}", exc)
+        return None
+
+
+async def _close_turn(
+    session_id: str, run_id: int | None, payload: ChatRequest, merged: dict[str, Any], latency_ms: int
+) -> None:
+    """收尾：更新 agent_run（轨迹/意图/耗时）+ 落一条 qa_history。全程尽力而为。"""
+    usage = get_llm().usage
+    answer = str(merged.get("answer") or "")
+    citations = list(merged.get("citations") or [])
+    reflection = merged.get("reflection") or {}
+
+    if run_id is not None:
+        try:
+            async with session_scope() as session:
+                run = await session.get(AgentRun, run_id)
+                if run is not None:
+                    steps = list(run.steps or [])
+                    steps.extend(t for t in (merged.get("trace") or []) if isinstance(t, dict))
+                    steps.append(
+                        {
+                            "node": "synthesizer",
+                            "content": answer,
+                            "citations": citations,
+                            "grounding_ratio": merged.get("grounding_ratio"),
+                            "latency_ms": latency_ms,
+                        }
+                    )
+                    run.steps = steps
+                    run.intent = merged.get("intent") or run.intent
+                    run.status = "succeeded"
+                    run.tokens_used = usage.total_tokens
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("运行记录收尾失败（回答已正常返回）：{}", exc)
+
+    try:
+        from app.api.v1.qa import persist_qa_history
+
+        default_user = await ensure_default_user()
+        await persist_qa_history(
+            user_id=default_user,
+            question=payload.query,
+            answer=answer,
+            intent=merged.get("intent"),
+            paper_ids=[int(p) for p in (payload.paper_ids or merged.get("target_papers") or [])],
+            citations=citations,
+            grounding_ratio=merged.get("grounding_ratio"),
+            faithfulness=(reflection.get("scores") or {}).get("faithfulness") if reflection else None,
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("助手消息落库失败（回答已正常返回）：{}", exc)
+        logger.warning("qa_history 落库失败（回答已正常返回）：{}", exc)
 
 
+# ------------------------------------------------------------------ 历史
 @router.get("/conversations", response_model=ApiResponse[Page[ConversationOut]], summary="会话列表")
 async def list_conversations(session: SessionDep, page: PageDep) -> ApiResponse[Page[ConversationOut]]:
-    total = int((await session.execute(select(func.count()).select_from(Conversation))).scalar_one())
-    rows = (
+    """按 `agent_runs.session_id` 聚合。这是阶段 1 没有 conversations 表后的替代方案。"""
+    grouped = (
+        await session.execute(
+            select(
+                AgentRun.session_id,
+                func.count().label("turns"),
+                func.min(AgentRun.created_at).label("created_at"),
+                func.max(AgentRun.created_at).label("updated_at"),
+            )
+            .group_by(AgentRun.session_id)
+            .order_by(func.max(AgentRun.created_at).desc())
+            .offset(page.offset)
+            .limit(page.page_size)
+        )
+    ).all()
+    total = int(
         (
+            await session.execute(select(func.count(func.distinct(AgentRun.session_id))).select_from(AgentRun))
+        ).scalar_one()
+    )
+
+    items: list[ConversationOut] = []
+    for sid, turns, created_at, updated_at in grouped:
+        first = (
             await session.execute(
-                select(Conversation).order_by(Conversation.updated_at.desc()).offset(page.offset).limit(page.page_size)
+                select(AgentRun).where(AgentRun.session_id == sid).order_by(AgentRun.created_at).limit(1)
+            )
+        ).scalar_one_or_none()
+        title = _first_question(first) or f"会话 {sid[:8]}"
+        last = (
+            await session.execute(
+                select(AgentRun.intent)
+                .where(AgentRun.session_id == sid, AgentRun.intent.is_not(None))
+                .order_by(AgentRun.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        items.append(
+            ConversationOut(
+                id=sid,
+                title=title[:60],
+                turns=int(turns),
+                last_intent=last,
+                created_at=created_at,
+                updated_at=updated_at,
             )
         )
-        .scalars()
-        .all()
-    )
-    counts = dict(
-        (
-            await session.execute(
-                select(Message.conversation_id, func.count())
-                .where(Message.conversation_id.in_([r.id for r in rows] or [""]))
-                .group_by(Message.conversation_id)
-            )
-        ).all()
-    )
+
     return ApiResponse.ok(
         Page[ConversationOut](
-            items=[
-                ConversationOut(
-                    id=r.id,
-                    title=r.title,
-                    paper_ids=list(r.paper_ids or []),
-                    message_count=int(counts.get(r.id, 0)),
-                    created_at=r.created_at,
-                    updated_at=r.updated_at,
-                )
-                for r in rows
-            ],
-            meta=PageMeta(total=total, page=page.page, page_size=page.page_size),
+            items=items,
+            meta=PageMeta(
+                total=total, page=page.page, page_size=page.page_size, has_next=page.offset + len(items) < total
+            ),
         )
     )
 
 
-@router.get("/conversations/{conv_id}", response_model=ApiResponse[ConversationDetail], summary="会话详情")
-async def get_conversation(conv_id: str, session: SessionDep) -> ApiResponse[ConversationDetail]:
-    conversation = await session.get(Conversation, conv_id)
-    if conversation is None:
-        raise NotFoundError(f"会话不存在: {conv_id}")
-    messages = (
-        (await session.execute(select(Message).where(Message.conversation_id == conv_id).order_by(Message.created_at)))
+def _first_question(run: AgentRun | None) -> str:
+    for step in run.steps or [] if run else []:
+        if step.get("node") == "user":
+            return str(step.get("content") or "")
+    return ""
+
+
+@router.get("/conversations/{session_id}", response_model=ApiResponse[ConversationDetail], summary="会话详情")
+async def get_conversation(session_id: str, session: SessionDep) -> ApiResponse[ConversationDetail]:
+    runs = (
+        (await session.execute(select(AgentRun).where(AgentRun.session_id == session_id).order_by(AgentRun.created_at)))
         .scalars()
         .all()
     )
+    if not runs:
+        raise NotFoundError(f"会话不存在: {session_id}")
+
+    messages: list[MessageOut] = []
+    for run in runs:
+        for step in run.steps or []:
+            node = step.get("node")
+            if node == "user":
+                messages.append(
+                    MessageOut(
+                        id=run.id, role="user", content=str(step.get("content") or ""), created_at=run.created_at
+                    )
+                )
+            elif node == "synthesizer":
+                messages.append(
+                    MessageOut(
+                        id=run.id,
+                        role="assistant",
+                        content=str(step.get("content") or ""),
+                        intent=run.intent,
+                        citations=list(step.get("citations") or []),
+                        grounding_ratio=step.get("grounding_ratio"),
+                        created_at=run.created_at,
+                    )
+                )
+
     return ApiResponse.ok(
         ConversationDetail(
-            id=conversation.id,
-            title=conversation.title,
-            paper_ids=list(conversation.paper_ids or []),
-            message_count=len(messages),
-            created_at=conversation.created_at,
-            updated_at=conversation.updated_at,
-            messages=[
-                MessageOut(
-                    id=m.id,
-                    role=m.role,
-                    content=m.content,
-                    intent=m.intent,
-                    citations=list(m.citations or []),
-                    grounding_ratio=m.grounding_ratio,
-                    created_at=m.created_at,
-                )
-                for m in messages
-            ],
+            id=session_id,
+            title=(_first_question(runs[0]) or f"会话 {session_id[:8]}")[:60],
+            turns=len(runs),
+            last_intent=runs[-1].intent,
+            created_at=runs[0].created_at,
+            updated_at=runs[-1].created_at,
+            messages=messages,
         )
     )
 
 
-@router.delete("/conversations/{conv_id}", response_model=ApiResponse[dict[str, Any]], summary="删除会话")
-async def delete_conversation(conv_id: str, session: SessionDep) -> ApiResponse[dict[str, Any]]:
-    conversation = await session.get(Conversation, conv_id)
-    if conversation is None:
-        raise NotFoundError(f"会话不存在: {conv_id}")
-    await session.execute(delete(Message).where(Message.conversation_id == conv_id))
-    await session.delete(conversation)
+@router.delete("/conversations/{session_id}", response_model=ApiResponse[dict[str, Any]], summary="删除会话")
+async def delete_conversation(session_id: str, session: SessionDep) -> ApiResponse[dict[str, Any]]:
+    result = await session.execute(delete(AgentRun).where(AgentRun.session_id == session_id))
     await session.commit()
-    return ApiResponse.ok({"deleted": conv_id})
+    if not result.rowcount:
+        raise NotFoundError(f"会话不存在: {session_id}")
+    return ApiResponse.ok({"deleted": session_id, "runs": result.rowcount})
+
+
+__all__ = ["router"]

@@ -35,7 +35,7 @@ class GraphOut(BaseModel):
 
 class GraphAnalysisRequest(BaseModel):
     analysis: AnalysisKind = "overview"
-    paper_ids: list[str] = Field(default_factory=list)
+    paper_ids: list[int] = Field(default_factory=list, description="限定子图范围；空=全库")
     source: str | None = Field(default=None, description="paths 分析用：起点论文 id")
     target: str | None = Field(default=None, description="paths 分析用：终点论文 id")
 
