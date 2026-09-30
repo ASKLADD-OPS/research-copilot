@@ -35,12 +35,16 @@ export default defineNuxtConfig({
 
   app: {
     head: {
-      title: 'Research Copilot · 研究工作台',
+      title: 'Research Copilot · 多智能体学术研究工作台',
       htmlAttrs: { lang: 'zh-CN' },
       meta: [
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-        { name: 'description', content: '多智能体学术研究助手：检索 · 问答 · 引文图谱 · 写作' },
+        {
+          name: 'description',
+          content:
+            '面向科研语料的多智能体研究助手：PDF 入库、混合检索、跨篇推理、引文图谱与写作辅助，回答带句级溯源。',
+        },
       ],
       link: [
         // Inter 走 CDN：它是这套设计的排版骨架，但装成本地依赖要带十几个 woff2 分片，
@@ -62,10 +66,17 @@ export default defineNuxtConfig({
     },
   },
 
-  // 长文本与 SSR 的取舍：ECharts / PDF.js 都是浏览器重组件，统一放 <ClientOnly> 里，
-  // 页面本身保持可 SSR（首屏骨架 + SEO 友好）。工作台本身是纯客户端交互，
-  // 但骨架 SSR 出来能让首屏不白屏，所以这里不做 ssr:false。
+  /*
+   * 渲染策略。
+   *
+   * 营销页要 SSR —— 搜索引擎必须能拿到完整 HTML（/blog 上线后尤其如此）。
+   * 工作台也**保持 SSR**：它的首屏骨架是服务端渲染出来的，关了会白屏（功能退化）。
+   * 不收录用页面里的 <meta name="robots" content="noindex"> 解决，不用关 SSR。
+   */
   routeRules: {
     '/': { ssr: true },
+    '/pricing': { ssr: true },
+    '/about': { ssr: true },
+    '/app/**': { ssr: true },
   },
 })

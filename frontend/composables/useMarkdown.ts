@@ -1,11 +1,11 @@
 import MarkdownIt from 'markdown-it'
-import DOMPurify from 'dompurify'
+import createDOMPurify from 'dompurify'
 
 /**
  * Markdown 渲染 + 引用角标 + MathJax 重排。
  *
  * 三件事分开做，因为它们的时机不同：
- *   - `render()`      纯字符串 → HTML，可在 SSR 跑
+ *   - `render()`      纯字符串 → HTML，**服务端与客户端都能跑**（见下面的 purifier 说明）
  *   - `decorate()`    需要真实 DOM，客户端
  *   - `typeset()`     MathJax 扫 DOM，客户端，且要节流（流式期间每个字都会触发）
  */
@@ -15,9 +15,31 @@ const md = new MarkdownIt({
   breaks: true,
 })
 
-/** 纯函数，SSR 安全。 */
+/**
+ * SSR 守卫 —— 这里曾经有一个只在生产才爆的坑。
+ *
+ * `dompurify` 的默认导出在**没有 DOM 的环境里是工厂函数，不是实例**：
+ * `isSupported === false`、`.sanitize` 是 `undefined`。直接调用会抛
+ * `TypeError: DOMPurify.sanitize is not a function`。
+ *
+ * 隐蔽之处在于"什么时候才会被调到"：工作台的聊天首屏没有消息，
+ * 所以 SSR 期间 `renderMarkdown` 从未真正执行 —— typecheck、build、
+ * SSR 冒烟**全都绿**。等到多了一个"每次请求都要渲染正文"的页面
+ * （比如博客详情），才会变成每请求 500。
+ *
+ * 服务端跳过净化是**安全**的：上面 markdown-it 配了 `html: false`，
+ * 裸标签已被转义成实体（`<script>` → `&lt;script&gt;`），没有注入面。
+ * 净化本身是纵深防御，留到客户端做即可。
+ */
+const purifier =
+  typeof (createDOMPurify as unknown as { sanitize?: unknown }).sanitize === 'function'
+    ? createDOMPurify
+    : null
+
+/** 纯函数，SSR 安全（服务端自动跳过净化，见 purifier 注释）。 */
 export function renderMarkdown(source: string): string {
-  return DOMPurify.sanitize(md.render(source || ''), { ADD_ATTR: ['data-marker'] })
+  const html = md.render(source || '')
+  return purifier ? purifier.sanitize(html, { ADD_ATTR: ['data-marker'] }) : html
 }
 
 /**

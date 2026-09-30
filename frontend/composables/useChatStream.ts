@@ -17,6 +17,11 @@ import type { StreamEvent, StreamEventName } from '~/types/api'
  */
 export interface StreamHandlers {
   onEvent: (evt: StreamEvent) => void
+  /**
+   * 原始帧旁路（可选）。收到的是解帧前的裸文本，用于"把 SSE 协议本身显示出来"
+   * 的场景（首页演示区 / 调试面板）。业务代码不需要它。
+   */
+  onRawFrame?: (frame: string) => void
   onError?: (err: Error) => void
   onClose?: () => void
 }
@@ -91,6 +96,7 @@ export function useChatStream() {
         while (sep !== -1) {
           const block = buffer.slice(0, sep)
           buffer = buffer.slice(sep + 2)
+          handlers.onRawFrame?.(block)
           const evt = parseFrame(block)
           if (evt) handlers.onEvent(evt)
           sep = buffer.indexOf('\n\n')
