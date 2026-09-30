@@ -1,6 +1,7 @@
 """对话：SSE 流式入口 + 会话历史。
 
-SSE 事件协议见 `app.llm.streaming` 模块头（前端 `components/ChatStream.vue` 按此消费）。
+SSE 事件协议见 `app.llm.streaming` 模块头（前端 `composables/useChatStream.ts` 按此消费，
+解帧后由 `stores/chat.ts` 分发到 UI）。
 流式实现要点：
 - `graph.astream(..., stream_mode=["updates", "custom"])`：`updates` 给节点级进度，
   `custom` 给 synthesizer 逐 token 推送的正文；
@@ -13,6 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -201,50 +203,65 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
 
 # ------------------------------------------------------------------ 历史
 async def _prepare_turn(conv_id: str | None, payload: ChatRequest) -> str:
-    """建会话（如无）+ 落用户消息，返回会话 id。"""
-    async with session_scope() as session:
-        conversation: Conversation | None = None
-        if conv_id:
-            conversation = await session.get(Conversation, conv_id)
-        if conversation is None:
-            conversation = Conversation(
-                title=payload.query[:60],
-                paper_ids=payload.paper_ids,
-            )
-            session.add(conversation)
-            await session.flush()
-        session.add(Message(conversation_id=conversation.id, role="user", content=payload.query))
-        return conversation.id
+    """建会话（如无）+ 落用户消息，返回会话 id。
+
+    持久化是**尽力而为**的：数据库不可用时不能把整轮回答一起废掉。
+    Agent 图自己用的是可降级的 checkpointer（AsyncPostgresSaver → MemorySaver），
+    没有 Postgres 照样能跑出答案 —— 之前这里直接裸写库，导致 DB 一挂，
+    整个 `/chat/stream` 连一个 token 都吐不出来（先抛连接超时，前端只能收到 error 帧）。
+    现在失败只记警告并退化成临时会话。
+    """
+    try:
+        async with session_scope() as session:
+            conversation: Conversation | None = None
+            if conv_id:
+                conversation = await session.get(Conversation, conv_id)
+            if conversation is None:
+                conversation = Conversation(
+                    title=payload.query[:60],
+                    paper_ids=payload.paper_ids,
+                )
+                session.add(conversation)
+                await session.flush()
+            session.add(Message(conversation_id=conversation.id, role="user", content=payload.query))
+            return conversation.id
+    except Exception as exc:  # noqa: BLE001 - 存储层任何故障都不该中断问答
+        logger.warning("会话落库失败，本轮以临时会话继续：{}", exc)
+        # 复用调用方给的 id（若在），否则现造一个 —— LangGraph 的 thread_id 不能为空
+        return conv_id or f"ephemeral-{uuid4().hex}"
 
 
 async def _finish_turn(conv_id: str, merged: dict[str, Any], latency_ms: int) -> None:
-    """落助手消息（含引用与溯源指标）。"""
+    """落助手消息（含引用与溯源指标）。同样是尽力而为，失败不抛。"""
     usage = get_llm().usage
     reflections = [merged["reflection"]] if merged.get("reflection") else []
-    async with session_scope() as session:
-        session.add(
-            Message(
-                conversation_id=conv_id,
-                role="assistant",
-                content=str(merged.get("answer") or ""),
-                intent=merged.get("intent"),
-                intent_confidence=merged.get("confidence"),
-                slot_filling=merged.get("slot_filling") or {},
-                target_papers=list(merged.get("target_papers") or []),
-                citations=list(merged.get("citations") or []),
-                grounding_ratio=merged.get("grounding_ratio"),
-                unsupported_claims=list(merged.get("unsupported_claims") or []),
-                reflections=reflections,
-                plan={"steps": merged.get("plan", [])},
-                tool_calls=[t for t in merged.get("trace", []) if t.get("node") in {"tool", "retriever"}],
-                latency_ms=latency_ms,
-                token_usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
+    try:
+        async with session_scope() as session:
+            session.add(
+                Message(
+                    conversation_id=conv_id,
+                    role="assistant",
+                    content=str(merged.get("answer") or ""),
+                    intent=merged.get("intent"),
+                    intent_confidence=merged.get("confidence"),
+                    slot_filling=merged.get("slot_filling") or {},
+                    target_papers=list(merged.get("target_papers") or []),
+                    citations=list(merged.get("citations") or []),
+                    grounding_ratio=merged.get("grounding_ratio"),
+                    unsupported_claims=list(merged.get("unsupported_claims") or []),
+                    reflections=reflections,
+                    plan={"steps": merged.get("plan", [])},
+                    tool_calls=[t for t in merged.get("trace", []) if t.get("node") in {"tool", "retriever"}],
+                    latency_ms=latency_ms,
+                    token_usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
+                )
             )
-        )
-        # 首句回答后把默认标题换掉（"新对话" 这种没有信息量）
-        conversation = await session.get(Conversation, conv_id)
-        if conversation is not None and conversation.title in {"", "新对话"}:
-            conversation.title = str(merged.get("answer") or "")[:60] or conversation.title
+            # 首句回答后把默认标题换掉（"新对话" 这种没有信息量）
+            conversation = await session.get(Conversation, conv_id)
+            if conversation is not None and conversation.title in {"", "新对话"}:
+                conversation.title = str(merged.get("answer") or "")[:60] or conversation.title
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("助手消息落库失败（回答已正常返回）：{}", exc)
 
 
 @router.get("/conversations", response_model=ApiResponse[Page[ConversationOut]], summary="会话列表")

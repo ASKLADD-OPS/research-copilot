@@ -1,6 +1,6 @@
 """SSE 流式工具。
 
-事件协议（前端 ChatStream.vue 按此消费）：
+事件协议（前端 `composables/useChatStream.ts` 按此消费）：
 
     event: token      data: {"text": "..."}              增量正文
     event: intent     data: {"intent": "...", "confidence": 0.92, ...}
