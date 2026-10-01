@@ -25,25 +25,41 @@ ReflectDim = Literal["faithfulness", "relevance", "coherence", "completeness"]
 
 
 class RetrievedDoc(TypedDict, total=False):
-    """检索到的一个片段。chunk_id 是溯源的唯一凭据。"""
+    """检索到的一个片段。chunk_id 是溯源的唯一凭据。
+
+    `bbox` 与 `page` 一起构成"跳回原文"的能力：page 让前端翻页，
+    bbox 让 PDF.js 在页内精确框出命中段落。所以它必须一路传到溯源输出，
+    不能只在检索层存在。
+    """
 
     chunk_id: str
     paper_id: str
     title: str
     section: str
     page: int
+    bbox: list[float] | None
     text: str
     score: float
     source: str  # dense | sparse | fused | rerank | web
 
 
 class Citation(TypedDict, total=False):
+    """一条溯源记录。字段与 `app.rag.source_tracing.SourceTrace` 对齐 ——
+    存成 dict 是因为要过 LangGraph 的 checkpointer（需可 pickle）。"""
+
     chunk_id: str
     paper_id: str
     title: str
+    section: str
     page: int
     quote: str
     verified: bool  # NLI 蕴含验证结果
+    marker: int  # 答案正文里的编号 [n]
+    answer_span: str  # 答案里引用它的那句话
+    char_span: list[int] | None  # 该句在答案中的字符区间（list 而非 tuple，便于 JSON 往返）
+    bbox: list[float] | None
+    confidence: float
+    attribution_method: str  # self_citation | nli | hybrid
 
 
 class PlanStep(TypedDict, total=False):

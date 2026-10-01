@@ -6,15 +6,18 @@ RRF 是整条检索链路的合流点：它错了，后面重排、CRAG、溯源
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 
 from app.rag.fusion import (
     DEFAULT_K,
+    DENSE_SOURCE,
+    SPARSE_SOURCE,
     dedupe_by_id,
     min_max_normalize,
     reciprocal_rank_fusion,
+    rrf_fuse,
 )
 
 
@@ -22,6 +25,8 @@ from app.rag.fusion import (
 class Doc:
     id: str
     text: str = ""
+    # rrf_fuse 靠改写这个字段来标注来源，所以测试替身必须有它
+    sources: list[str] = field(default_factory=list)
 
 
 @pytest.mark.unit
@@ -136,3 +141,110 @@ def test_min_max_normalize_is_for_display_only():
     assert min_max_normalize([0.0, 10.0]) == [0.0, 1.0]
     mid = min_max_normalize([1.0, 2.0, 3.0])
     assert mid[1] == pytest.approx(0.5)
+
+
+# ================================================================ rrf_fuse（两路 + 来源标记）
+@pytest.mark.unit
+def test_rrf_fuse_default_k_matches_paper_value():
+    """k 默认值与规格一致（60），不允许悄悄改成别的常数。"""
+    a = Doc("a")
+    assert rrf_fuse([a], [])[0][1] == pytest.approx(1 / (60 + 1))
+
+
+@pytest.mark.unit
+def test_rrf_fuse_tags_source_of_each_result():
+    """来源标记三态：dense / sparse / both（两路都召回）。"""
+    a, b, c = Doc("a"), Doc("b"), Doc("c")
+    fused = rrf_fuse([a, b], [b, c])
+    tags = {doc.id: doc.sources for doc, _ in fused}
+    assert tags["a"] == [DENSE_SOURCE]
+    assert tags["c"] == [SPARSE_SOURCE]
+    assert tags["b"] == [DENSE_SOURCE, SPARSE_SOURCE]
+
+
+@pytest.mark.unit
+def test_rrf_fuse_source_tags_are_written_onto_the_item():
+    """标记写在 item 本身上（原地改写），因为融合结果要继续走完整条链路。"""
+    a = Doc("a")
+    fused = rrf_fuse([a], [a])
+    assert fused[0][0] is a
+    assert a.sources == [DENSE_SOURCE, SPARSE_SOURCE]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dense", "sparse", "expected_ids"),
+    [
+        ([], [], []),  # 两路都空
+        ([], ["s1", "s2"], ["s1", "s2"]),  # dense 空 → 只由 sparse 贡献
+        (["d1", "d2"], [], ["d1", "d2"]),  # sparse 空 → 只由 dense 贡献
+    ],
+)
+def test_rrf_fuse_handles_empty_paths(dense, sparse, expected_ids):
+    """任一路为空都不能抛异常 —— 稀疏通道缺失是**会真实发生**的降级场景。"""
+    docs = {i: Doc(i) for i in {*dense, *sparse}}
+    fused = rrf_fuse([docs[i] for i in dense], [docs[i] for i in sparse])
+    assert [doc.id for doc, _ in fused] == expected_ids
+    for doc, _ in fused:
+        assert len(doc.sources) == 1  # 只有一路有结果，来源标记就只能是那一个
+
+
+@pytest.mark.unit
+def test_rrf_fuse_empty_result_does_not_raise():
+    assert rrf_fuse([], []) == []
+
+
+@pytest.mark.unit
+def test_rrf_fuse_fully_overlapping_paths():
+    """完全重叠（同一批文档、同一顺序）：分数翻倍，顺序不变，全部标 both。"""
+    a, b, c = Doc("a"), Doc("b"), Doc("c")
+    fused = rrf_fuse([a, b, c], [a, b, c])
+    assert [doc.id for doc, _ in fused] == ["a", "b", "c"]
+    scores = [s for _, s in fused]
+    assert scores[0] == pytest.approx(2 / 61)
+    assert scores[1] == pytest.approx(2 / 62)
+    assert scores[2] == pytest.approx(2 / 63)
+    assert all(doc.sources == [DENSE_SOURCE, SPARSE_SOURCE] for doc, _ in fused)
+
+
+@pytest.mark.unit
+def test_rrf_fuse_fully_disjoint_paths_interleaves_by_rank():
+    """完全不重叠：没有两条结果共享排名贡献，顺序由名次交替决定。"""
+    fused = rrf_fuse([Doc("d1"), Doc("d2"), Doc("d3")], [Doc("s1"), Doc("s2"), Doc("s3")])
+    assert [doc.id for doc, _ in fused] == ["d1", "s1", "d2", "s2", "d3", "s3"]
+    scores = {doc.id: s for doc, s in fused}
+    assert scores["d1"] == pytest.approx(1 / 61)
+    assert scores["s1"] == pytest.approx(1 / 61)
+    assert scores["d3"] == pytest.approx(1 / 63)
+
+
+@pytest.mark.unit
+def test_rrf_fuse_partially_overlapping_only_overlap_gets_both():
+    """部分重叠：只有交集被标 both，并且它的分数严格高于两侧独有项。"""
+    fused = rrf_fuse([Doc("d1"), Doc("x")], [Doc("s1"), Doc("x")])
+    scores = {doc.id: s for doc, s in fused}
+    tags = {doc.id: doc.sources for doc, _ in fused}
+    assert tags["x"] == [DENSE_SOURCE, SPARSE_SOURCE]
+    assert tags["d1"] == [DENSE_SOURCE]
+    assert tags["s1"] == [SPARSE_SOURCE]
+    assert scores["x"] == pytest.approx(2 / 62)
+    assert scores["x"] > scores["d1"] == scores["s1"]
+
+
+@pytest.mark.unit
+def test_rrf_fuse_agrees_with_generic_fusion():
+    """rrf_fuse 只是 reciprocal_rank_fusion 的两路封装 —— 分数必须逐项一致，
+    否则"带来源标记"这个便利会变成两套算法的漂移源。"""
+    a, b, c = Doc("a"), Doc("b"), Doc("c")
+    fused = rrf_fuse([a, b], [b, c])
+    generic = reciprocal_rank_fusion([[a, b], [b, c]])
+    assert [(d.id, s) for d, s in fused] == [(d.id, s) for d, s in generic]
+
+
+@pytest.mark.unit
+def test_rrf_fuse_same_object_in_both_paths_is_deduped():
+    """同一实例在两路出现只保留一份 —— 否则下游会把同一个 chunk 当两条证据。"""
+    a = Doc("a")
+    fused = rrf_fuse([a], [a])
+    assert len(fused) == 1
+    assert fused[0][1] == pytest.approx(2 / 61)

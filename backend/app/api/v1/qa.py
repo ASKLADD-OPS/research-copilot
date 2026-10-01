@@ -32,6 +32,7 @@ from app.schemas import (
     QAHistoryOut,
     RetrievalDebug,
     RetrievedChunkOut,
+    SourceTraceOut,
     TraceRequest,
     TraceResult,
 )
@@ -44,16 +45,37 @@ _MARKER_RE = re.compile(r"\[(\d+)\]")
 
 
 def _chunk_out(chunk: Any) -> RetrievedChunkOut:
+    """检索片段的响应视图。
+
+    要同时接受两种形态，这不是洁癖：`/qa/retrieve` 拿到的是一串
+    `RetrievedChunk` 对象，而 `/qa/ask` 拿到的是 state 里的 `RetrievedDoc` dict。
+    只认其中一种时另一种会**静默退化成全零**（getattr 取不到就给默认值），
+    前端于是展示出一堆 chunk_id=0 的"证据"。
+    """
+    as_dict = isinstance(chunk, dict)
+
+    def pick(name: str, *, alt: str | None = None, default: Any = None) -> Any:
+        value = chunk.get(name) if as_dict else getattr(chunk, alt or name, None)
+        return default if value is None else value
+
+    if as_dict:
+        # state 里的 source 是逗号拼接的字符串（见 agents/nodes/retriever._to_docs）
+        raw_sources = str(pick("source", default=""))
+        sources = [s for s in raw_sources.split(",") if s]
+    else:
+        sources = list(pick("sources", default=[]) or [])
+
     return RetrievedChunkOut(
-        chunk_id=int(getattr(chunk, "id", 0) or 0),
-        paper_id=int(getattr(chunk, "paper_id", 0) or 0),
-        section=getattr(chunk, "section", None),
-        page=getattr(chunk, "page", None),
-        bbox=getattr(chunk, "bbox", None),
-        score=round(float(getattr(chunk, "score", 0.0) or 0.0), 6),
-        rerank_score=getattr(chunk, "rerank_score", None),
-        sources=list(getattr(chunk, "sources", []) or []),
-        preview=(getattr(chunk, "content", "") or "")[:300],
+        chunk_id=int(pick("chunk_id", alt="id", default=0) or 0),
+        paper_id=int(pick("paper_id", default=0) or 0),
+        title=str(pick("title", default="")),
+        section=pick("section"),
+        page=pick("page"),
+        bbox=pick("bbox"),
+        score=round(float(pick("score", default=0.0) or 0.0), 6),
+        rerank_score=None if as_dict else pick("rerank_score"),
+        sources=sources,
+        preview=(str(pick("text", alt="content", default="")) or "")[:300],
     )
 
 
@@ -92,6 +114,7 @@ def build_sources(citations: list[dict[str, Any]], answer: str) -> list[dict[str
     """把 Agent 的 citations 转成 `qa_history.sources` 的结构。
 
     结构（规格约定）：{answer_span, chunk_id, paper_id, page, bbox, confidence, method}
+    其中 `answer_span` 是**字符区间**（落库用，前端按区间高亮）。
     """
     markers = {int(c.get("marker", 0)) for c in citations if c.get("marker")}
     spans = locate_answer_spans(answer, markers)
@@ -101,20 +124,48 @@ def build_sources(citations: list[dict[str, Any]], answer: str) -> list[dict[str
         chunk_id = cite.get("chunk_id")
         if chunk_id in (None, "", 0):
             continue  # 没有 chunk 的引用等于幻觉引用，不收进溯源记录
-        score = float(cite.get("nli_score") or 0.0)
-        method = "nli" if score > 0 else ("self_citation" if cite.get("verified") else "lexical")
+        score = float(cite.get("nli_score") or cite.get("confidence") or 0.0)
+        # 优先采信溯源引擎给出的认定方式；旧数据（没有该字段）按分数反推
+        method = str(cite.get("attribution_method") or "")
+        if method not in {"self_citation", "nli", "hybrid"}:
+            method = "nli" if score > 0 else "self_citation"
+        span = cite.get("char_span") or (list(spans[int(cite["marker"])]) if cite.get("marker") in spans else None)
         out.append(
             {
-                "answer_span": list(spans[int(cite["marker"])]) if cite.get("marker") in spans else None,
+                "answer_span": list(span) if span else None,
                 "chunk_id": int(chunk_id),
                 "paper_id": int(cite["paper_id"]) if cite.get("paper_id") not in (None, "") else None,
-                "page": cite.get("page_start"),
+                "page": cite.get("page_start") or cite.get("page"),
                 "bbox": cite.get("bbox"),
                 "confidence": round(score, 4),
                 "method": method,
             }
         )
     return out
+
+
+def build_source_traces(citations: list[dict[str, Any]], answer: str) -> list[SourceTraceOut]:
+    """API 响应里的溯源数组（规格契约：answer_span 给**文本片段**，不是区间）。
+
+    与落库结构共用同一套解析逻辑 —— 直接从 `build_sources` 的区间切回文本，
+    免得两处各写一份"哪个 marker 对应哪句话"的判断然后慢慢漂开。
+    """
+    traces: list[SourceTraceOut] = []
+    for item in build_sources(citations, answer):
+        span = item.get("answer_span")
+        text = answer[span[0] : span[1]].strip() if span else ""
+        traces.append(
+            SourceTraceOut(
+                answer_span=text,
+                chunk_id=item["chunk_id"],
+                paper_id=item.get("paper_id"),
+                page=item.get("page"),
+                bbox=item.get("bbox"),
+                confidence=float(item.get("confidence") or 0.0),
+                attribution_method=item.get("method") or "self_citation",
+            )
+        )
+    return traces
 
 
 async def persist_qa_history(
@@ -181,8 +232,11 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             page=c.get("page_start") or c.get("page"),
             bbox=c.get("bbox"),
             quote=str(c.get("quote", ""))[:280],
+            answer_span=str(c.get("answer_span", "")),
             nli_score=float(c.get("nli_score") or 0.0),
+            confidence=float(c.get("confidence") or c.get("nli_score") or 0.0),
             verified=bool(c.get("verified", False)),
+            attribution_method=c.get("attribution_method") or ("hybrid" if c.get("verified") else "self_citation"),
         )
         for c in raw_citations
     ]
@@ -191,6 +245,8 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             cite.title = next((r.title for r in retrieved if r.chunk_id == cite.chunk_id), "")
 
     answer = str(state.get("answer") or "")
+    # 溯源列表：答案 + 溯源数组一起返回，前端拿到就能做句子高亮与 PDF 跳转
+    sources = build_source_traces(raw_citations, answer)
     reflection = state.get("reflection") or {}
     usage = get_llm().usage
     latency = int((time.perf_counter() - started) * 1000)
@@ -214,6 +270,7 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             intent=str(state.get("intent") or ""),
             intent_confidence=float(state.get("confidence") or 0.0),
             citations=citations,
+            sources=sources,
             grounding_ratio=grounding,
             passed_grounding=state.get("guardrail_passed", grounding >= 0.8),
             unsupported_claims=state.get("unsupported_claims") or [],
@@ -266,6 +323,8 @@ async def trace(payload: TraceRequest, session: SessionDep) -> ApiResponse[Trace
             grounding_ratio=report.grounding_ratio,
             sentences_total=report.sentences_total,
             sentences_supported=report.sentences_supported,
+            terms_total=report.terms_total,
+            terms_supported=report.terms_supported,
             passed=report.passed,
             phantom_markers=report.phantom_markers,
             unsupported_claims=report.unsupported_claims,
@@ -278,11 +337,27 @@ async def trace(payload: TraceRequest, session: SessionDep) -> ApiResponse[Trace
                     paper_id=int(c.paper_id) if c.paper_id not in (None, "") else None,
                     section=c.section,
                     page=c.page_start,
+                    bbox=c.bbox,
                     quote=c.quote,
+                    answer_span=c.answer_span,
                     nli_score=round(c.nli_score, 4),
+                    confidence=round(c.confidence, 4),
                     verified=c.supported,
+                    attribution_method=c.attribution_method,
                 )
                 for c in report.citations
+            ],
+            sources=[
+                SourceTraceOut(
+                    answer_span=s.answer_span,
+                    chunk_id=int(s.chunk_id) if s.chunk_id not in (None, "") else None,
+                    paper_id=int(s.paper_id) if s.paper_id not in (None, "") else None,
+                    page=s.page,
+                    bbox=s.bbox,
+                    confidence=round(s.confidence, 4),
+                    attribution_method=s.attribution_method,
+                )
+                for s in report.source_traces()
             ],
         )
     )
@@ -297,4 +372,4 @@ async def history(
     return ApiResponse.ok([QAHistoryOut.model_validate(r) for r in rows])
 
 
-__all__ = ["build_sources", "locate_answer_spans", "persist_qa_history", "router"]
+__all__ = ["build_source_traces", "build_sources", "locate_answer_spans", "persist_qa_history", "router"]

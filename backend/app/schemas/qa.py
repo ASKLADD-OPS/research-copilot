@@ -7,6 +7,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# 一条溯源的认定方式：白名单自引 | NLI 模型蕴含 | 两者融合（词法蕴含 + 数字硬规则）
+AttributionMethod = Literal["self_citation", "nli", "hybrid"]
+
 
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
@@ -40,8 +43,23 @@ class CitationOut(BaseModel):
     page: int | None = None
     bbox: Any | None = None
     quote: str = ""
+    answer_span: str = Field(default="", description="答案里引用它的那句话（去掉编号）")
     nli_score: float = 0.0
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="= nli_score，按规格另给一个名字")
     verified: bool = False
+    attribution_method: AttributionMethod = "self_citation"
+
+
+class SourceTraceOut(BaseModel):
+    """对外溯源契约 —— 前端 PDF 高亮定位所需的一切都在这里。"""
+
+    answer_span: str = Field(default="", description="答案中被该证据支撑的文本片段")
+    chunk_id: int | None = None
+    paper_id: int | None = None
+    page: int | None = Field(default=None, description="PDF 页码，用于跳转")
+    bbox: Any | None = Field(default=None, description="命中块坐标，用于 PDF.js 框选")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    attribution_method: AttributionMethod = "self_citation"
 
 
 class SourceSpan(BaseModel):
@@ -53,7 +71,7 @@ class SourceSpan(BaseModel):
     page: int | None = None
     bbox: Any | None = None
     confidence: float = 0.0
-    method: Literal["nli", "lexical", "self_citation"] = "nli"
+    method: Literal["nli", "lexical", "self_citation", "hybrid"] = "nli"
 
 
 class RetrievalDebug(BaseModel):
@@ -72,6 +90,7 @@ class AskResult(BaseModel):
     intent: str = ""
     intent_confidence: float = 0.0
     citations: list[CitationOut] = Field(default_factory=list)
+    sources: list[SourceTraceOut] = Field(default_factory=list, description="溯源列表（规格契约，含 bbox/confidence）")
     grounding_ratio: float = 0.0
     passed_grounding: bool = Field(default=False, description="grounding_ratio ≥ 阈值且无幻觉引用编号")
     unsupported_claims: list[str] = Field(default_factory=list)
@@ -97,12 +116,15 @@ class TraceResult(BaseModel):
     grounding_ratio: float = 0.0
     sentences_total: int = 0
     sentences_supported: int = 0
+    terms_total: int = 0
+    terms_supported: int = 0
     passed: bool = False
     phantom_markers: list[int] = Field(default_factory=list)
     unsupported_claims: list[str] = Field(default_factory=list)
     uncited_claims: list[str] = Field(default_factory=list)
     number_mismatches: list[str] = Field(default_factory=list)
     citations: list[CitationOut] = Field(default_factory=list)
+    sources: list[SourceTraceOut] = Field(default_factory=list)
 
 
 class QAHistoryOut(BaseModel):
@@ -125,11 +147,13 @@ class QAHistoryOut(BaseModel):
 __all__ = [
     "AskRequest",
     "AskResult",
+    "AttributionMethod",
     "CitationOut",
     "QAHistoryOut",
     "RetrievalDebug",
     "RetrievedChunkOut",
     "SourceSpan",
+    "SourceTraceOut",
     "TraceRequest",
     "TraceResult",
 ]

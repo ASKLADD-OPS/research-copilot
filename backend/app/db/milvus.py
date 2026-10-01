@@ -340,6 +340,30 @@ class MilvusStore:
             for h in group
         ]
 
+    def sparse_search(self, sparse: Any, *, limit: int = 10, expr: str | None = None) -> list[VectorHit]:
+        """仅稀疏路（bge-m3 learned sparse，token 级权重 → IP 打分）。
+
+        与 dense 路的关系是**互补**而非重复：dense 抓语义相似，sparse 抓"共享关键词"，
+        测评称与 BM25 同族。两路各自召回后由 `app.rag.fusion.rrf_fuse` 按名次融合。
+        """
+        payload = sparse_to_dict(sparse)
+        if not payload:
+            return []  # 空稀疏向量会让 Milvus 报错，直接当"这一路没结果"处理
+        raw = self.client.search(
+            collection_name=self.chunks,
+            data=[payload],
+            anns_field=SPARSE_FIELD,
+            search_params={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+            limit=limit,
+            output_fields=["id", "paper_id", "chunk_id"],
+            filter=expr or "",
+        )
+        return [
+            VectorHit.from_entity(dict(h.get("entity") or {}), h.get("distance", 0.0), source="sparse")
+            for group in (raw or [])
+            for h in group
+        ]
+
     def search_summaries(self, dense: list[float], *, limit: int = 10) -> list[VectorHit]:
         """论文级检索 / 语义去重：返回 (paper_id, 相似度)。"""
         raw = self.client.search(
@@ -448,6 +472,10 @@ async def adense_search(dense: list[float], **kwargs: Any) -> list[VectorHit]:
     return await asyncio.to_thread(lambda: get_store().dense_search(dense, **kwargs))
 
 
+async def asparse_search(sparse: Any, **kwargs: Any) -> list[VectorHit]:
+    return await asyncio.to_thread(lambda: get_store().sparse_search(sparse, **kwargs))
+
+
 async def asearch_summaries(dense: list[float], **kwargs: Any) -> list[VectorHit]:
     return await asyncio.to_thread(lambda: get_store().search_summaries(dense, **kwargs))
 
@@ -475,6 +503,7 @@ __all__ = [
     "ahealth",
     "ahybrid_search",
     "asearch_summaries",
+    "asparse_search",
     "aupsert_chunks",
     "aupsert_summaries",
     "build_chunks_index_params",

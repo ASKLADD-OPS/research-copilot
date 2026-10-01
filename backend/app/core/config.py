@@ -85,9 +85,12 @@ class Settings(BaseSettings):
     REDIS_CONNECT_TIMEOUT: float = 2.0
 
     # ------------------------------------------------------------------ 检索
+    # 阶梯：每路召回 RETRIEVAL_RECALL_K → RRF 融合取 RRF_TOP_K → 重排取 RERANK_TOP_K
     RRF_K: int = 60
-    RETRIEVAL_TOP_K: int = 20
-    RETRIEVAL_RECALL_K: int = 50
+    RETRIEVAL_TOP_K: int = 20  # 调用方未显式给 top_k 时的兜底上限
+    RETRIEVAL_RECALL_K: int = 20  # dense / sparse **各自**召回多少条
+    RRF_TOP_K: int = 10  # RRF 融合后进入重排的候选数
+    RERANK_TOP_K: int = 5  # 重排后最终返回给生成侧的条数
     RERANKER_ENABLED: bool = True
     RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
 

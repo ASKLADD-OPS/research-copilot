@@ -16,15 +16,21 @@ from app.rag.retriever import HybridRetriever, RetrievedChunk
 
 
 def _to_docs(chunks: list[RetrievedChunk]) -> list[RetrievedDoc]:
-    """转成 state 里可序列化的 dict（LangGraph checkpointer 要能 pickle）。"""
+    """转成 state 里可序列化的 dict（LangGraph checkpointer 要能 pickle）。
+
+    `bbox` 必须一起带过去：它是 PDF.js 框选命中段落的坐标，只在检索层存着
+    就等于前端拿不到精确定位（只剩页码）。
+    """
     docs: list[RetrievedDoc] = []
     for c in chunks:
+        bbox = c.bbox
         docs.append(
             RetrievedDoc(
                 chunk_id=c.id,
                 paper_id=c.paper_id,
                 section=c.section or "",
                 page=c.page or 0,
+                bbox=list(bbox) if isinstance(bbox, (list, tuple)) else bbox,
                 text=c.content,
                 score=c.final_score,
                 source=",".join(c.sources) or "dense",

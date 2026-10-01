@@ -12,8 +12,11 @@ RRF 用**排名**而不是原始分数做融合：
 3. 对"某一路上排名靠前"的文档给足奖励，避免单个召回源的偏差主导结果。
 
 Milvus 的 `RRFRanker` 已经实现了 dense+sparse 两路的 RRF（见 app.db.milvus）。
-这里再实现一份纯 Python 版本，用途是融合**第三路及以上的召回源**
-（引文图谱召回、Web Search 兜底），因为 Milvus 只认识它自己集合内的那两路。
+这里再实现一份纯 Python 版本，两个用途：
+1. `rrf_fuse(dense, sparse, k=60)` —— 两路融合**并标注来源**（dense / sparse / both），
+   原生 ranker 不返回这个归属；
+2. `reciprocal_rank_fusion(rankings)` —— 融合**第三路及以上**的召回源
+   （引文图谱召回、Web Search 兜底），因为 Milvus 只认识它自己集合内的那两路。
 """
 
 from __future__ import annotations
@@ -23,12 +26,23 @@ from typing import Protocol, TypeVar
 
 DEFAULT_K = 60
 
+# 来源标记。值是给前端直接显示的，所以用英文小写单词而不是枚举。
+DENSE_SOURCE = "dense"
+SPARSE_SOURCE = "sparse"
+
 
 class _HasId(Protocol):
     id: str
 
 
+class _HasSources(_HasId, Protocol):
+    """融合结果要能带上"来自哪一路"，没有这个属性就没法标来源。"""
+
+    sources: list[str]
+
+
 T = TypeVar("T", bound=_HasId)
+F = TypeVar("F", bound=_HasSources)
 
 
 def reciprocal_rank_fusion(
@@ -67,6 +81,46 @@ def reciprocal_rank_fusion(
     return [(first_seen[key], score) for key, score in ordered]
 
 
+def rrf_fuse(
+    dense_results: Sequence[F],
+    sparse_results: Sequence[F],
+    *,
+    k: int = DEFAULT_K,
+) -> list[tuple[F, float]]:
+    """Dense + Sparse 两路 RRF 融合，并在每个结果上标注**来源**。
+
+    与 Milvus 原生 `RRFRanker(k)` 的关系
+    ------------------------------------
+    公式完全一致（都是 Σ 1/(k+rank)），差别只有一个：原生 `hybrid_search` 只回
+    融合后的名次，不回"这一条来自哪一路"。溯源面板要显示 dense / sparse / both，
+    所以这里显式跑两路再融合。多一次 ANN 查询换来源归属，值。
+
+    返回
+    ----
+    [(item, rrf_score)] 按分数降序。每个 item 的 `sources` 被**改写**为
+    `["dense"]` / `["sparse"]` / `["dense", "sparse"]`（后者即两路都召回的 "both"）。
+    改写而不是新建对象：融合结果继续往下走整条链路，拿到的必须是同一个实例。
+
+    边界
+    ----
+    任一路为空 → 只由另一路贡献分数，`sources` 也只有那一个标记；
+    两路都空 → 返回空列表（不抛错，检索链路对空结果有统一的降级处理）。
+    """
+    dense, sparse = list(dense_results), list(sparse_results)
+    fused = reciprocal_rank_fusion([dense, sparse], k=k)
+
+    in_dense = {item.id for item in dense}
+    in_sparse = {item.id for item in sparse}
+    for item, _ in fused:
+        tags: list[str] = []
+        if item.id in in_dense:
+            tags.append(DENSE_SOURCE)
+        if item.id in in_sparse:
+            tags.append(SPARSE_SOURCE)
+        item.sources = tags
+    return fused
+
+
 def dedupe_by_id(items: Sequence[T]) -> list[T]:
     """保持原顺序去重。检索链路里多处需要（同 chunk 被两路召回）。"""
     seen: set[str] = set()
@@ -91,12 +145,13 @@ def min_max_normalize(scores: Sequence[float]) -> list[float]:
 
 def _demo() -> None:
     """自检：RRF 的核心性质。任何一条不成立就说明融合逻辑坏了。"""
-    from dataclasses import dataclass
+    from dataclasses import dataclass, field
 
     @dataclass
     class Doc:
         id: str
         text: str = ""
+        sources: list[str] = field(default_factory=list)
 
     a, b, c, d = Doc("a"), Doc("b"), Doc("c"), Doc("d")
 
@@ -133,6 +188,23 @@ def _demo() -> None:
 
     assert dedupe_by_id([a, Doc("a"), b]).__len__() == 2
     assert min_max_normalize([5.0, 5.0]) == [1.0, 1.0]
+
+    # 7) rrf_fuse：来源标记必须是 dense / sparse / 两者都有
+    a, b, c = Doc("a"), Doc("b"), Doc("c")
+    fused = rrf_fuse([a, b], [b, c])
+    tags = {x.id: x.sources for x, _ in fused}
+    assert tags["a"] == ["dense"], tags
+    assert tags["c"] == ["sparse"], tags
+    assert tags["b"] == ["dense", "sparse"], tags
+    # 8) 任一路为空不能炸，来源标记也要跟着变
+    assert [x.id for x, _ in rrf_fuse([], [])] == []
+    assert [x.sources for x, _ in rrf_fuse([], [c])] == [["sparse"]]
+    assert [x.sources for x, _ in rrf_fuse([a], [])] == [["dense"]]
+    # 9) 两路完全重叠时分数翻倍（2/(k+rank)），顺序不变
+    fused = rrf_fuse([a, b], [a, b])
+    assert [x.id for x, _ in fused] == ["a", "b"]
+    assert abs(fused[0][1] - 2 / 61) < 1e-12, fused
+
     print("fusion self-check OK")
 
 

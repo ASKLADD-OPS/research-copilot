@@ -19,6 +19,10 @@ from app.rag.retriever import RetrievedChunk, to_context_block
 
 
 def _chunks_of(state: AgentState) -> list[RetrievedChunk]:
+    """把 state 里的检索结果还原成溯源引擎认识的对象。
+
+    `bbox` 与 `page` 都要还原 —— 溯源输出里的定位信息就是从这里来的。
+    """
     docs = state.get("reranked") or state.get("retrieved") or []
     return [
         RetrievedChunk(
@@ -27,6 +31,7 @@ def _chunks_of(state: AgentState) -> list[RetrievedChunk]:
             content=str(d.get("text", "")),
             section=d.get("section") or None,
             page=d.get("page") or None,
+            bbox=d.get("bbox"),
         )
         for d in docs
         if d.get("chunk_id")
@@ -147,6 +152,15 @@ def _trace(answer: str, chunks: list[RetrievedChunk]) -> tuple[list[Citation], f
                 page=c.page_start or 0,
                 quote=c.quote,
                 verified=bool(c.supported),
+                marker=c.marker,
+                # 下面四项是"溯源完整传递到 API 响应"需要的：前端拿它们做
+                # 句子高亮（char_span）、PDF 框选（bbox）、可信度条（confidence）、
+                # 以及区分"NLI 判定"与"仅白名单通过"（attribution_method）。
+                answer_span=c.answer_span,
+                char_span=list(c.char_span) if c.char_span else None,
+                bbox=list(c.bbox) if isinstance(c.bbox, (list, tuple)) else c.bbox,
+                confidence=round(c.confidence, 4),
+                attribution_method=c.attribution_method,
             )
             for c in report.citations
         ]
@@ -180,10 +194,14 @@ def _whitelist_check(answer: str, chunks: list[RetrievedChunk]) -> tuple[list[Ci
     cited = sorted({m for m in markers if 1 <= m <= max_idx})
     citations = [
         Citation(
-            chunk_id=chunks[i - 1].id,
-            paper_id=chunks[i - 1].paper_id,
-            page=chunks[i - 1].page_start or 0,
+            chunk_id=str(chunks[i - 1].id),
+            paper_id=str(chunks[i - 1].paper_id),
+            # `RetrievedChunk` 的字段是单值 `page`（旧结构才叫 page_start）。
+            # 两种都认：这条降级路径只在溯源引擎挂掉时走，本来就不该再因为
+            # 一个字段名把整次问答带崩。
+            page=getattr(chunks[i - 1], "page", None) or getattr(chunks[i - 1], "page_start", None) or 0,
             verified=False,
+            attribution_method="self_citation",  # 只过了编号白名单，语义上未经校验
         )
         for i in cited
     ]

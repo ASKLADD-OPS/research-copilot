@@ -1,12 +1,22 @@
-"""混合检索器：Dense + Sparse 两路 → Milvus 原生 RRF → （可选）第三路融合 → CrossEncoder 重排。
+"""混合检索器：Dense + Sparse 两路 → RRF 融合 → （可选）第三路融合 → CrossEncoder 重排。
 
-调用链
-------
+调用链与每一级的条数
+--------------------
 query → bge-m3 编码（dense 1024 维 + learned sparse）
-      → Milvus `paper_chunks` hybrid_search（`AnnSearchRequest` × 2 + `RRFRanker(k=60)`）
+      → Dense 路 `paper_chunks` COSINE 召回 top_k=20 ┐
+      → Sparse 路 `paper_chunks` IP 召回   top_k=20 ┘
+      → `rrf_fuse(k=60)` 按名次融合，**标注来源** dense / sparse / both
+      → 截断到 RRF_TOP_K=10
       → **回 PostgreSQL 补正文**（见下）
-      → 若调用方提供了额外召回路（引文图谱 / Web 兜底），用 `reciprocal_rank_fusion` 再融合一次
-      → CrossEncoder 重排 → top_k
+      → 若调用方提供了额外召回路（引文图谱 / Web 兜底），再 RRF 融合一次
+      → CrossEncoder 重排 → RERANK_TOP_K=5
+
+为什么两路分开跑，而不是调 Milvus 的 `hybrid_search`
+----------------------------------------------------
+原生 `RRFRanker` 的公式与 `rrf_fuse` 完全一致（见 app.rag.fusion），但**只返回融合后的
+名次，不返回每条结果来自哪一路**。规格要求溯源面板显示 dense / sparse / both，这个归属
+只能由"两次单路召回"拿到。代价是一次额外的 ANN 查询，换来的是可解释的召回来源。
+`ahybrid_search` 仍保留（单机 RRF、少一次 RPC），供不需要来源归属的场景使用。
 
 为什么要回表
 ------------
@@ -15,28 +25,23 @@ query → bge-m3 编码（dense 1024 维 + learned sparse）
 代价就是这一步：一次 `WHERE id IN (...)`，不是 N+1。换来的是"读到的正文
 一定和 PG 一致"，以及改 chunk 策略后不必重建向量之外的任何东西。
 
-为什么两段式融合而不是一次算完
-------------------------------
-Milvus 的 `RRFRanker` 只能融合**它自己集合内**的两路。图谱召回（NetworkX 内存图）
-和 Web 兜底都不在 Milvus 里，只能在拿到 Milvus 结果后再做一次 RRF。
-两次 RRF 的分数不可直接比较，但排序语义一致 —— 我们只消费排序。
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.milvus import VectorHit, ahybrid_search
+from app.db.milvus import VectorHit, adense_search, asparse_search
 from app.db.session import session_scope
 from app.embeddings.bge_m3 import get_embedder
 from app.models import Chunk
-from app.rag.fusion import dedupe_by_id, reciprocal_rank_fusion
+from app.rag.fusion import dedupe_by_id, reciprocal_rank_fusion, rrf_fuse
 
 
 @dataclass(slots=True)
@@ -138,14 +143,25 @@ class HybridRetriever:
             logger.error("嵌入失败，无法检索（embedding 后端可能未就绪）")
             return []
 
-        hits = await ahybrid_search(
-            emb.dense[0],
-            emb.sparse[0] if emb.sparse else {},
-            limit=max(top_k, recall_k),
-            recall_k=recall_k,
-            expr=expr,
+        # ---- 两路独立召回，各 recall_k 条 ----
+        dense_hits = await adense_search(emb.dense[0], limit=recall_k, expr=expr)
+        sparse_hits: list[VectorHit] = []
+        if emb.sparse:
+            sparse_hits = await asparse_search(emb.sparse[0], limit=recall_k, expr=expr)
+        else:
+            # bge-m3 缺失 sparse 通道时不能整个检索挂掉：退化为纯稠密路，
+            # 来源标记会诚实地只剩 ["dense"]（而不是假装两路都有）。
+            logger.warning("稀疏向量为空，本轮降级为纯 Dense 召回")
+
+        # ---- RRF 融合（k=60）并标注来源，再截断到 RRF_TOP_K ----
+        fused = rrf_fuse(
+            [RetrievedChunk.from_vector_hit(h) for h in dense_hits],
+            [RetrievedChunk.from_vector_hit(h) for h in sparse_hits],
+            k=settings.RRF_K,
         )
-        primary = [RetrievedChunk.from_vector_hit(h) for h in hits]
+        # score 换成 RRF 分：dense 的 COSINE 与 sparse 的 IP 不同量纲，
+        # 混在一个字段里下游无法比较（这正是要 RRF 的原因）。sources 由 rrf_fuse 写好。
+        primary = [replace(chunk, score=score) for chunk, score in fused[: settings.RRF_TOP_K]]
 
         ranked_paths: list[list[RetrievedChunk]] = [primary]
         weights: list[float] = [1.0]
@@ -156,22 +172,9 @@ class HybridRetriever:
             weights = [1.0, *extra_weights]
 
         if len(ranked_paths) > 1:
-            fused = reciprocal_rank_fusion(ranked_paths, k=settings.RRF_K, weights=weights)
-            merged = dedupe_by_id(
-                [
-                    RetrievedChunk(
-                        id=chunk.id,
-                        paper_id=chunk.paper_id,
-                        content=chunk.content,
-                        section=chunk.section,
-                        page=chunk.page,
-                        bbox=chunk.bbox,
-                        score=score,
-                        sources=chunk.sources,
-                    )
-                    for chunk, score in fused
-                ]
-            )
+            # 第二次 RRF：融合的是**名次**，所以第一段的 RRF 分数无需与图谱/Web 的分数量纲对齐
+            second = reciprocal_rank_fusion(ranked_paths, k=settings.RRF_K, weights=weights)
+            merged = dedupe_by_id([chunk for chunk, _ in second])
         else:
             merged = dedupe_by_id(primary)
 
@@ -182,10 +185,14 @@ class HybridRetriever:
         if rerank and merged:
             from app.rag.reranker import get_reranker
 
-            merged = await get_reranker().arerank(query, merged)
+            merged = await get_reranker().arerank(query, merged, top_k=settings.RERANK_TOP_K)
+            final_k = top_k
+        else:
+            # 没有重排就停在 RRF 那一级，不要顺手塞 20 条给生成侧
+            final_k = min(top_k, settings.RRF_TOP_K)
 
-        logger.debug("检索完成 query={!r} 候选={} 返回={}", query[:40], len(merged), min(top_k, len(merged)))
-        return merged[:top_k]
+        logger.debug("检索完成 query={!r} 候选={} 返回={}", query[:40], len(merged), min(final_k, len(merged)))
+        return merged[:final_k]
 
 
 def to_context_block(chunks: Sequence[RetrievedChunk], *, max_chars: int = 12000) -> str:

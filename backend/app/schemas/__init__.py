@@ -24,6 +24,7 @@ from app.schemas.qa import (
     RetrievalDebug,
     RetrievedChunkOut,
     SourceSpan,
+    SourceTraceOut,
     TraceRequest,
     TraceResult,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "RetrievalDebug",
     "RetrievedChunkOut",
     "SourceSpan",
+    "SourceTraceOut",
     "StoreHealth",
     "ToolCallRequest",
     "ToolCallResult",
