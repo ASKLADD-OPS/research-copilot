@@ -69,6 +69,7 @@ async def replanner_node(state: AgentState) -> dict[str, Any]:
                         f"用户需求：{state.get('query')}\n\n"
                         f"已完成步骤与结果：\n{_fmt(done)}\n\n"
                         f"剩余待执行步骤：\n{_fmt(remaining, with_status=False)}\n\n"
+                        f"历次评审记录（Reflexion）：\n{reflection_history(state)}\n\n"
                         f"当前 replan 轮次：{rnd}/{settings.REPLAN_MAX_ROUNDS}"
                     ),
                 },
@@ -109,6 +110,26 @@ async def replanner_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+def reflection_history(state: AgentState, limit: int = 3) -> str:
+    """把历次评审摊平给重规划看（Reflexion 的"反思记忆"）。
+
+    只看工具失败会漏掉一整类偏差：工具**都成功**、但产出被评审判为不忠实/不相关。
+    这类情况补救办法完全不同（要换检索词或补证据，而不是换工具），所以必须让
+    replanner 看得到。
+    """
+    rounds = [t for t in (state.get("trace") or []) if isinstance(t, dict) and t.get("node") == "reflector"]
+    if not rounds:
+        return "（无）"
+    lines: list[str] = []
+    for r in rounds[-limit:]:
+        scores = r.get("scores") or {}
+        dims = " ".join(f"{k}={float(v):.2f}" for k, v in scores.items()) if scores else "未打分"
+        lines.append(
+            f"- 第 {r.get('round', '?')} 轮 verdict={r.get('verdict')} {dims}：{str(r.get('critique', ''))[:200]}"
+        )
+    return "\n".join(lines)
+
+
 def _fmt(steps: list[dict[str, Any]], *, with_status: bool = True) -> str:
     if not steps:
         return "（无）"
@@ -127,4 +148,4 @@ def route_after_replan(state: AgentState) -> str:
     return "executor" if state.get("current_step", 0) < len(plan) else "reflector"
 
 
-__all__ = ["OPEN_STATUSES", "ReplanResult", "replanner_node", "route_after_replan"]
+__all__ = ["OPEN_STATUSES", "ReplanResult", "reflection_history", "replanner_node", "route_after_replan"]

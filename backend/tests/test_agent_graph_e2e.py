@@ -433,6 +433,40 @@ async def test_chat_sse_frames_come_out_in_graph_order(install_llm, fake_retriev
 
 
 @pytest.mark.e2e
+async def test_dag_plan_runs_parallel_branches_then_joins(install_llm, fake_tools):
+    """Planner 给出的 DAG 在图上真的按依赖调度：两支并行跑完，join 步才轮到。
+
+    前一条 e2e 用的都是直线计划，`parallel_group` / `dependencies` 只要被 executor
+    静默忽略也照样绿 —— 这条专门盯 DAG。
+    """
+    plan = {
+        "steps": [
+            {"idx": 1, "goal": "汇总方法差异", "tool": "python_exec", "parallel_group": "agg"},
+            {"idx": 2, "goal": "汇总指标差异", "tool": "python_exec", "parallel_group": "agg"},
+            {"idx": 3, "goal": "合成对照表", "tool": "python_exec", "dependencies": [1, 2]},
+        ],
+        "reasoning": "两路并行汇总 → 一路 join",
+    }
+    llm = install_llm(
+        _intent=_intent("cross_paper_reasoning"),
+        _plan=plan,
+        _executor=["Final Answer: 方法支路结论", "Final Answer: 指标支路结论", "Final Answer: 对照表"],
+        _reflection=_scores(0.95),
+        _synthesizer=FINAL_ANSWER,
+    )
+    graph = build_graph(with_checkpointer=False)
+    state = await graph.ainvoke(new_state(QUERY, session_id="s-dag"))
+
+    assert llm.calls_of("_executor") == 3, "三个步骤（含两支并行）都该被执行"
+    assert [s["status"] for s in state["plan"]] == ["done", "done", "done"]
+
+    # join 步真的等到两个分支都完成之后才执行：轨迹里的步序就是调度序
+    goals = [t.get("goal") for t in state["trace"] if t.get("node") == "executor" and t.get("goal")]
+    assert goals == ["汇总方法差异", "汇总指标差异", "合成对照表"], goals
+    assert state["answer"] == FINAL_ANSWER
+
+
+@pytest.mark.e2e
 def test_draw_mermaid_png_renders():
     """验收 1：`draw_mermaid_png()` 能产出真实 PNG。
 

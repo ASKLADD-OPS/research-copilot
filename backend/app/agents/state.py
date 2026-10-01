@@ -47,10 +47,20 @@ class Citation(TypedDict, total=False):
 
 
 class PlanStep(TypedDict, total=False):
+    """计划中的一步。`dependencies` + `parallel_group` 让计划是 DAG 而非流水线。
+
+    - `dependencies`：前置步骤的 `idx`。**只允许指向更小的 `idx`** —— 强制这一条
+      就天然无环，不需要单独的环检测。
+    - `parallel_group`：同一标签的步骤之间互不依赖，executor 会并发跑。
+      空/缺省 = 只能串行。
+    """
+
     idx: int
     goal: str
     tool: str
-    status: Literal["pending", "running", "done", "failed"]
+    dependencies: list[int]
+    parallel_group: str
+    status: Literal["pending", "running", "done", "failed", "replanned"]
     result: str
 
 
