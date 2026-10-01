@@ -74,11 +74,16 @@ class HybridVector:
 
 # ---------------------------------------------------------------- 纯函数工具
 def normalize_dense(vec: list[float]) -> list[float]:
-    """L2 归一化。用 COSINE 度量时等价，但归一化后换任何度量都不会因模长漂移失真。"""
-    norm = math.sqrt(sum(v * v for v in vec))
+    """L2 归一化。用 COSINE 度量时等价，但归一化后换任何度量都不会因模长漂移失真。
+
+    出口一律 `float(...)`：模型输出是 numpy 数组，`list(v)` 拿到的是 `np.float32`。
+    把 np.float32 留在结果里有两处会炸 —— 一是 `json.dumps` 直接抛 TypeError
+    （`qa_history.sources` 这类字段要落库/回前端），二是 Pydantic 校验指纹不稳定。
+    """
+    norm = math.sqrt(sum(float(v) * float(v) for v in vec))
     if norm == 0.0:
-        return list(vec)
-    return [v / norm for v in vec]
+        return [float(v) for v in vec]
+    return [float(v) / norm for v in vec]
 
 
 def top_weights(sparse: dict[int, float], top_n: int = 256) -> dict[int, float]:
