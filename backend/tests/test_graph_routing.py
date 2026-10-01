@@ -164,12 +164,41 @@ def test_reflect_refines_only_when_verdict_says_so():
 
 
 @pytest.mark.unit
-def test_refine_round_limit_is_enforced(settings):
-    """轮次用尽必须收手，否则 executor ↔ reflector 会无限打转。"""
+def test_reflect_router_follows_the_verdict_only():
+    """路由只认判定，不认轮次 —— 预算判断在 reflector 节点里，见下一个用例。"""
+    assert route_after_reflect({"reflection": {"verdict": "refine"}}) == "refine"
+    assert route_after_reflect({"reflection": {"verdict": "refine"}, "refine_round": 99}) == "refine"
+    assert route_after_reflect({"reflection": {"verdict": "pass"}, "refine_round": 0}) == "synthesizer"
+
+
+@pytest.mark.unit
+async def test_reflector_stops_asking_for_refine_once_budget_is_spent(monkeypatch, settings):
+    """轮次用尽必须自己改判 pass，否则 executor ↔ reflector 会无限打转。
+
+    这条曾经挂在路由函数上，而路由看到的 `refine_round` 已经被节点 +1 过 ——
+    于是 `REFLECTION_MAX_REFINE = 2` 实际只跑到 1 次 refine。现在预算在节点内判，
+    `refine_round` 记的就是"已执行的 refine 次数"，与 replanner 的 `plan_round` 同义。
+    """
+    import app.agents.nodes.reflector as reflector
+    from app.agents.nodes.reflector import ReflectionResult
+
+    async def always_low(schema, messages, **kwargs):  # noqa: ARG001
+        return ReflectionResult(scores=dict.fromkeys(reflector.WEIGHTS, 0.2), critique="不行", fix_hint="重写")
+
+    monkeypatch.setattr(reflector, "complete_structured", always_low)
+
     limit = settings.REFLECTION_MAX_REFINE
     assert limit == 2
-    at_limit = {"reflection": {"verdict": "refine"}, "refine_round": limit}
-    assert route_after_reflect(at_limit) == "synthesizer"
+
+    first = await reflector.reflector_node({"draft": "草稿", "refine_round": 0})
+    assert first["reflection"]["verdict"] == "refine"
+    assert first["refine_round"] == 1
+    assert first["current_step"] == 0  # 指针拨回第一步重做
+
+    spent = await reflector.reflector_node({"draft": "草稿", "refine_round": limit})
+    assert spent["reflection"]["verdict"] == "pass"
+    assert "预算已用尽" in spent["reflection"]["critique"]
+    assert "refine_round" not in spent, "预算用尽后不该再加轮次"
 
 
 @pytest.mark.unit

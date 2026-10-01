@@ -91,8 +91,20 @@ def route_after_planner_plan(state: AgentState) -> str:
     return "executor"
 
 
-def build_graph(*, with_checkpointer: bool = True) -> Any:
-    """构建图。`with_checkpointer=False` 用于单测（不落库）。"""
+def build_graph(
+    *,
+    with_checkpointer: bool = True,
+    checkpointer: Any = None,
+    human_in_the_loop: bool = False,
+) -> Any:
+    """构建图。
+
+    - `with_checkpointer=False`：单测用，不落库。
+    - `checkpointer=`：显式注入（单测给 MemorySaver，免 Postgres）。
+    - `human_in_the_loop=True`：在 executor 前 `interrupt_before`，让用户改完计划再恢复。
+      **默认关闭** —— `/chat/stream` 靠一次 `astream` 跑到底，默认开中断会让 SSE 每轮都停在
+      半途（前端只会看到一帧都没吐完就结束）。只有需要人工审批计划的入口才开。
+    """
     g = StateGraph(AgentState)
 
     # ---- 节点 ----
@@ -163,9 +175,16 @@ def build_graph(*, with_checkpointer: bool = True) -> Any:
     g.add_edge("synthesizer", "guardrails")
     g.add_edge("guardrails", END)
 
-    checkpointer = build_checkpointer() if with_checkpointer else None
-    compiled = g.compile(checkpointer=checkpointer)
-    logger.info("Agent 图编译完成（checkpointer={}）", type(checkpointer).__name__ if checkpointer else "None")
+    cp = checkpointer if checkpointer is not None else (build_checkpointer() if with_checkpointer else None)
+    compiled = g.compile(
+        checkpointer=cp,
+        interrupt_before=["executor"] if human_in_the_loop else None,
+    )
+    logger.info(
+        "Agent 图编译完成（checkpointer={} hitl={}）",
+        type(cp).__name__ if cp else "None",
+        human_in_the_loop,
+    )
     return compiled
 
 

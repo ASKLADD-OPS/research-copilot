@@ -26,7 +26,7 @@ def _chunks_of(state: AgentState) -> list[RetrievedChunk]:
             paper_id=str(d.get("paper_id", "")),
             content=str(d.get("text", "")),
             section=d.get("section") or None,
-            page_start=d.get("page") or None,
+            page=d.get("page") or None,
         )
         for d in docs
         if d.get("chunk_id")

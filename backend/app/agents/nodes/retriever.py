@@ -24,7 +24,7 @@ def _to_docs(chunks: list[RetrievedChunk]) -> list[RetrievedDoc]:
                 chunk_id=c.id,
                 paper_id=c.paper_id,
                 section=c.section or "",
-                page=c.page_start or 0,
+                page=c.page or 0,
                 text=c.content,
                 score=c.final_score,
                 source=",".join(c.sources) or "dense",

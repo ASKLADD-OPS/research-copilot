@@ -13,6 +13,10 @@ from app.core.logging import logger
 from app.llm.client import Role
 from app.llm.structured import complete_structured
 
+# "未完成"的步骤状态：只有这两种值得再规划。
+# "replanned" 是**已被取代**（本模块重规划时打的标），"done" 是已完成。
+OPEN_STATUSES = ("pending", "failed")
+
 
 class ReplanResult(BaseModel):
     decision: str = Field(default="continue", description="continue | replan | finish")
@@ -21,21 +25,34 @@ class ReplanResult(BaseModel):
 
 
 async def replanner_node(state: AgentState) -> dict[str, Any]:
+    """决定"是否补一步"。
+
+    `remaining` 曾经写作 `plan[current_step:]`，而本节点**只在计划跑完时被进入**
+    （`route_after_execute` 只在 `current_step >= len(plan)` 时指过来），
+    于是它恒为空列表、"replan" 分支是一段死代码 —— 工具失败后只会一路滑到评审。
+    现在按**状态**取未完成步骤（含 failed），失败才有可观测的重规划触发条件。
+
+    重规划采取**尾追**而不是替换剩余段：已完成/已取代的步骤保持原位，
+    新步骤追加到队尾，`current_step` 停在原计划长度即指向第一个新步骤。
+    """
     plan = list(state.get("plan") or [])
     idx = state.get("current_step", 0)
-    done, remaining = plan[:idx], plan[idx:]
+    done = [s for s in plan if s.get("status") == "done"]
+    # 只有 pending / failed 算"未完成"。被重规划取代的步骤状态是 "replanned"，
+    # 它既没成功也不该再触发下一轮重规划 —— 漏掉这一条会让每次重规划都再重规划一次。
+    remaining = [s for s in plan if s.get("status") in OPEN_STATUSES]
     rnd = state.get("plan_round", 0)
     budget_left = rnd < settings.REPLAN_MAX_ROUNDS
 
-    # 预算用尽：不再问 LLM，直接继续（省一次调用，也避免模型硬要 replan）
+    # 全部完成 或 预算用尽：不问 LLM，直接继续（省一次调用，也避免模型硬要 replan）
     if not budget_left or not remaining:
         return {
-            "current_step": idx,
+            "current_step": max(idx, len(plan)),
             "trace": [
                 {
                     "node": "replanner",
                     "decision": "continue",
-                    "reason": "replan 预算用尽" if not budget_left else "无剩余步骤",
+                    "reason": "replan 预算用尽" if not budget_left else "无未完成步骤",
                     "round": rnd,
                 }
             ],
@@ -65,16 +82,16 @@ async def replanner_node(state: AgentState) -> dict[str, Any]:
         }
 
     if result.decision == "replan" and result.new_steps:
-        # 已完成的步骤必须保留：重规划只替换剩余部分
-        base = len(done)
-        new_plan = done + [
+        # 失败步骤标 "replanned"：它已被新步骤取代，不该在下一轮再次触发重规划。
+        base = len(plan)
+        new_plan = [{**s, "status": "replanned"} if s.get("status") == "failed" else s for s in plan] + [
             PlanStep(**{**s, "idx": base + i + 1, "status": "pending"}) for i, s in enumerate(result.new_steps)
         ]
         logger.info("重规划第 {} 轮：{} 步 → {} 步", rnd + 1, len(plan), len(new_plan))
         return {
             "plan": new_plan,
             "plan_round": rnd + 1,
-            "current_step": idx,
+            "current_step": base,  # 指向第一个新步骤
             "trace": [
                 {
                     "node": "replanner",
@@ -110,4 +127,4 @@ def route_after_replan(state: AgentState) -> str:
     return "executor" if state.get("current_step", 0) < len(plan) else "reflector"
 
 
-__all__ = ["ReplanResult", "replanner_node", "route_after_replan"]
+__all__ = ["OPEN_STATUSES", "ReplanResult", "replanner_node", "route_after_replan"]

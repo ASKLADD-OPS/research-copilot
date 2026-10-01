@@ -56,7 +56,7 @@ def _context_of(state: AgentState, max_chars: int = 12000) -> str:
             paper_id=str(d.get("paper_id", "")),
             content=str(d.get("text", "")),
             section=d.get("section") or None,
-            page_start=d.get("page") or None,
+            page=d.get("page") or None,
         )
         for d in docs
     ]
@@ -87,6 +87,7 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
     llm = get_llm()
     answer = ""
+    concluded = False  # 本步有没有拿到"结论"，见下方 status 的用法
     for rnd in range(settings.AGENT_MAX_REACT_ROUNDS):
         try:
             out = await llm.complete(Role.EXECUTOR, messages, temperature=0.2)
@@ -100,6 +101,7 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
         if action is None:  # 没有 Action → 视为最终答复
             answer = out.strip()
+            concluded = True
             thought_log.append({"node": "executor", "round": rnd, "final": answer[:400]})
             break
 
@@ -124,8 +126,11 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
 
     plan = list(state.get("plan") or [])
     idx = state.get("current_step", 0)
+    # 没拿到结论就标 failed —— replanner 靠这个状态决定要不要补一步。
+    # 之前一律写 "done"，于是"重规划"永远没有触发条件（见 replanner 模块头）。
+    status = "done" if concluded else "failed"
     if 0 <= idx < len(plan):
-        plan[idx] = {**plan[idx], "status": "done", "result": answer[:1000]}
+        plan[idx] = {**plan[idx], "status": status, "result": answer[:1000]}
 
     return {
         "plan": plan,

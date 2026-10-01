@@ -45,7 +45,7 @@ async def retrieve_papers(
                 "chunk_id": c.id,
                 "paper_id": c.paper_id,
                 "section": c.section or "",
-                "page": c.page_start or 0,
+                "page": c.page or 0,
                 "score": round(c.final_score, 4),
                 "text": c.content[:2000],
             }

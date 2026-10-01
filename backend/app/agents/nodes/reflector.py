@@ -71,7 +71,16 @@ async def reflector_node(state: AgentState) -> dict[str, Any]:
         scores, critique, hint = dict.fromkeys(WEIGHTS, 1.0), f"评审器不可用：{exc}", ""
 
     overall, verdict = score_of(scores)
-    rnd = state.get("refine_round", 0)
+    rnd = state.get("refine_round", 0)  # 已执行的 refine 次数
+
+    # 预算判断放在**节点内**，与 replanner 一致。
+    # 放在路由函数里会差一轮：路由看到的 refine_round 已经 +1，再和上限比较，
+    # 于是 "max 2 次" 实际只执行 1 次 —— 第 2 次判定 refine 时就被判"轮次用尽"。
+    budget_exhausted = verdict == "refine" and rnd >= settings.REFLECTION_MAX_REFINE
+    if budget_exhausted:
+        verdict = "pass"
+        critique = f"{critique}（refine 预算已用尽 {rnd}/{settings.REFLECTION_MAX_REFINE}，按当前稿收尾）"
+
     logger.info("评审 overall={:.2f} verdict={} round={}", overall, verdict, rnd)
 
     patch: dict[str, Any] = {
@@ -95,7 +104,7 @@ async def reflector_node(state: AgentState) -> dict[str, Any]:
         ],
     }
 
-    # 要 refine：指针拨回第 0 步、轮次 +1。上限判断在 route_after_reflect 里做。
+    # 要 refine：指针拨回第 0 步、已执行轮次 +1。还能不能再来一次由上面的预算决定。
     if verdict == "refine":
         patch["refine_round"] = rnd + 1
         patch["current_step"] = 0
@@ -104,10 +113,9 @@ async def reflector_node(state: AgentState) -> dict[str, Any]:
 
 
 def route_after_reflect(state: AgentState) -> str:
-    """refine 条件边：verdict=refine 且未超轮次 → 回 executor 重写。"""
+    """refine 条件边：verdict=refine 就回 executor 重写。预算已由 reflector 判定。"""
     refl = state.get("reflection") or {}
-    rounds_left = state.get("refine_round", 0) < settings.REFLECTION_MAX_REFINE
-    return "refine" if refl.get("verdict") == "refine" and rounds_left else "synthesizer"
+    return "refine" if refl.get("verdict") == "refine" else "synthesizer"
 
 
 def _draft_from_plan(state: AgentState) -> str:
