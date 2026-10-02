@@ -31,12 +31,20 @@ interface TraceItem {
   detail?: string
 }
 
+// 预设必须按**意图置信度的余量**挑，不是按"跑通过一次"挑。
+// 后端 classify 低于 0.6 会转澄清追问（不出 token），而这些问句的置信度是浮动的 ——
+// 同一条问句每轮都可能落在阈值两侧。实测（本机降级环境，各 3–4 轮）：
+//   translation「把这句话翻译成…」0.95–0.96  → 4/4 出正文，且跑完 Plan → 反思 → 重规划
+//   translation「把下面这句话翻成中文…」0.96  → 3/3
+//   chitchat「你能做什么？」0.95–0.97         → 4/4，最快
+// 已被换掉的坑：visualization「画一张检索流程的图」实测 0.58–0.63，**会在 0.6 下面抖**（3 轮里 1 轮转澄清），
+//   writing_assist「帮我写一段论文摘要的开头」0.84–0.88，4 轮里 2 轮零 token（模型层偶发空返回）。
+// 换预设前请照这个方法量几轮余量（直接打 POST /api/v1/chat/stream，读 intent 帧的
+// confidence，数 token 帧）：**别只看一次结果**，0.6 附近的问句同一句话每轮都可能翻车。
 const PRESETS = [
-  // 三个都实测跑得通（本机降级环境下，见模板里的降级说明）：
-  // 可视化与翻译会走完 Plan → 反思 → 重规划整条循环，打招呼最稳。
-  '画一张检索流程的图',
-  '把这句话翻译成英文：混合检索优于单路检索',
   '你能做什么？',
+  '把这句话翻译成英文：混合检索优于单路检索，但需要重排兜底。',
+  '把下面这句话翻成中文：Retrieval-augmented generation grounds answers in cited evidence.',
 ] as const
 
 const question = ref('')
