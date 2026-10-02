@@ -45,7 +45,17 @@ class Settings(BaseSettings):
     # —— 所以这里给 3s，双栈最坏 6s，仍在 /health 的 8s 护栏内。
     DB_CONNECT_TIMEOUT: int = 3
 
-    # ------------------------------------------------------------------ 文档解析（MinerU）
+    # ------------------------------------------------------------------ 文档解析（版面 / OCR / 公式）
+    # 版面重排与坐标还原：PyMuPDF 按内容流给块，双栏论文的左栏第 1 段后面跟着的是
+    # **右栏第 1 段** —— 不重排则正文语义错乱（见 app/parsers/layout_parser.py）。
+    LAYOUT_ENABLED: bool = True
+    # 有文本层的页占比低于它 → 判为扫描件，转 OCR。整份 PDF 一页都抽不出字时是 0.0。
+    OCR_TEXT_RATIO_THRESHOLD: float = 0.5
+    OCR_DPI: int = 200  # 渲染倍率；低于 150 小字号公式容易被 OCR 认错
+    # 行内公式是否包成 $...$（供前端 MathJax 渲染）。关掉它只影响**行内**，
+    # 块级公式一律转 LaTeX —— 那是 chunk_type=formula 的载荷本身。
+    FORMULA_INLINE_LATEX: bool = True
+
     # MinerU 以 CLI 形式调用（见 app/parsers/mineru.py）：它依赖 torch + 数 GB 模型权重，
     # 放在独立 venv / 独立容器里，靠 MINERU_CMD 指过去，不要塞进 API 进程。
     MINERU_ENABLED: bool = True
@@ -100,6 +110,16 @@ class Settings(BaseSettings):
     CRAG_AMBIGUOUS_LOW: float = 0.3
     CRAG_REWRITE_MAX_RETRY: int = 3
     GROUNDING_MIN_RATIO: float = 0.8
+
+    # ------------------------------------------------------------------ 语义去重
+    # 论文级摘要向量的余弦相似度 ≥ 它 → 判为跨库重复（合并到已有那一篇）。
+    # bge-m3 下同一篇论文的不同版本通常 > 0.97，同主题的两篇不同论文很少超 0.93，
+    # 0.95 落在两个分布之间。
+    SEMANTIC_DEDUP_THRESHOLD: float = 0.95
+    SEMANTIC_DEDUP_TOP_N: int = 5  # 每次去重看摘要向量的前 N 条候选
+    # arXiv 直接下载：单篇 PDF 的体积上限（超过就拒绝，别把磁盘塞满）
+    ARXIV_MAX_PDF_MB: int = 60
+    BATCH_UPLOAD_MAX_FILES: int = 20  # 一次批量最多几篇 —— 解析是串行的重活
 
     # ------------------------------------------------------------------ LLM
     LLM_PROVIDER: str = "deepseek"

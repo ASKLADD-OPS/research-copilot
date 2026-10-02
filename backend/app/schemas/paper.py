@@ -55,6 +55,10 @@ class PaperOut(PaperBase):
     parser: str | None = None
     page_count: int | None = None
     error: str | None = None
+    # 跨库重复时指向"正主"那一篇（见 app/parsers/semantic_dedup.py）。
+    # 注意与 `version` 区分：同一篇论文的不同 arXiv 版本是**两条独立记录**，
+    # 靠 `GET /papers/{id}/versions` 看谱系，这里的字段只管"同一份内容合并"。
+    duplicate_of: int | None = None
     created_at: datetime
 
 
@@ -70,6 +74,22 @@ class PaperUploadResult(BaseModel):
         default=False,
         description="是否已排入后台解析。进度改看 papers.parsed_status，轮询 GET /papers/{id}",
     )
+    #: 去重判定结果。`kind=duplicate` 时 `paper.duplicate_of` 已指向正主；
+    #: `kind=new_version` 表示同一篇 arXiv 论文的另一个版本，两版都留着。
+    dedup: dict[str, Any] | None = Field(default=None, description="见 app.parsers.semantic_dedup.DedupVerdict")
+
+
+class BatchUploadResult(BaseModel):
+    """批量上传的逐条结果。
+
+    **刻意不做成"全成功或全失败"**：一次传 20 篇，第 7 篇是加密 PDF 不该把
+    前 6 篇一起回滚。`failed` 里逐条给原因，前端可以只重传那几条。
+    """
+
+    items: list[PaperUploadResult] = Field(default_factory=list)
+    failed: list[dict[str, Any]] = Field(default_factory=list, description="[{filename, error}]")
+    accepted: int = 0
+    started: int = 0
 
 
 class ChunkOut(BaseModel):
@@ -89,6 +109,7 @@ class ChunkOut(BaseModel):
 
 
 __all__ = [
+    "BatchUploadResult",
     "ChunkOut",
     "ChunkType",
     "PaperBase",

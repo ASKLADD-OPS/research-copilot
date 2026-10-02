@@ -4,12 +4,18 @@
 套一层协程外壳，反而让"阻塞到底发生在哪"更难看清。调用方（`app.indexing.runner`）
 用 `asyncio.to_thread` 把它挪出事件循环即可。
 
-一次入库做四件事
+一次入库做五件事
 ----------------
-1. 解析 + 分块 → `chunks`（同时 upsert `paper_versions` 记录 arXiv 版本谱系）
-2. bge-m3 双向量 → Milvus `paper_chunks`（id = chunk_id，PG 与向量库一一对齐）
-3. 论文级摘要向量 → Milvus `paper_summaries`（供语义去重与论文级检索）
-4. 参考文献 → `citations` 边表
+1. 解析 + 分块 → `chunks`（带页码、归一化 bbox、chunk_type；公式与图注各成一块）
+2. **语义去重**（写向量之前）：同一篇 arXiv 论文的另一版本只记谱系不合并；
+   跨库重复（摘要向量 ≥ 0.95）合并到已有那一篇，**不重复写向量**（见下方注释）
+3. bge-m3 双向量 → Milvus `paper_chunks`（id = chunk_id，PG 与向量库一一对齐）
+4. 论文级摘要向量 → Milvus `paper_summaries`（供语义去重与论文级检索）
+5. 参考文献 → `citations` 边表；`paper_versions` 记版本谱系 + 语义指纹
+
+**为什么去重要在写向量之前**：合并的语义是"库里只有一份向量"。先写再删的话
+（delete_paper + 回滚）中间会出现"两个 paper_id 指向同一段正文"的窗口，
+检索侧会短暂召回重复项；而且失败时留下的幽灵向量没人收。
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from app.db.milvus import get_store
 from app.db.session import session_scope
 from app.embeddings.bge_m3 import get_embedder
 from app.models import Chunk, Citation, Paper, PaperVersion
-from app.parsers import chunk_document, parse_pdf
+from app.parsers import chunk_document, parse_pdf, resolve_duplicate, semantic_fingerprint
 from app.parsers.pdf import parse_reference_metadata
 
 _WS_RE = re.compile(r"\s+")
@@ -38,8 +44,12 @@ def semantic_hash(title: str | None, abstract: str | None) -> str:
 
     这是**廉价近似**，不是真的语义哈希 —— 措辞一变（"we propose" → "this paper
     presents"）它就变了。它的用途是版本谱系里的"这版是不是换了个说法"的初筛，
-    真正判定近似重复靠 `paper_summaries` 的向量相似度（见 `find_duplicate`）。
+    真正判定近似重复靠 `paper_summaries` 的向量相似度（见 `find_duplicate_paper`）。
     之所以两者都留：指纹便宜且可索引，向量贵但准。
+
+    与 `semantic_dedup.semantic_fingerprint`（md5(标题向量+摘要向量+作者)）是
+    两个东西：这个是**落 `papers.semantic_hash` 列**的文本指纹（不依赖嵌入模型，
+    所以 HTTP 层随叫随算）；那个要把两段文本喂进模型，只在入库流水线里有。
     """
     raw = _WS_RE.sub(" ", f"{title or ''} {abstract or ''}".strip().lower())
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -63,6 +73,7 @@ async def _load_paper(paper_id: int) -> dict[str, Any] | None:
             "arxiv_id": row.arxiv_id,
             "version": row.version,
             "abstract": row.abstract,
+            "authors": row.authors or [],
             "semantic_hash": row.semantic_hash,
         }
 
@@ -89,7 +100,7 @@ def _index_paper_inner(paper_id: int) -> dict[str, Any]:
 
     asyncio.run(_set_paper(paper_id, parsed_status="parsing", error=None))
 
-    # 1) 解析（MinerU 首选，失败自动降级 PyMuPDF → pdfplumber → pypdf）
+    # 1) 解析（MinerU 首选，失败自动降级 PyMuPDF → pdfplumber → pypdf；扫描件走 OCR）
     doc = parse_pdf(file_path)
     chunks = chunk_document(doc)
     if not chunks:
@@ -114,8 +125,57 @@ def _index_paper_inner(paper_id: int) -> dict[str, Any]:
     if len(vectors) != len(chunks):
         raise RuntimeError(f"嵌入数量不匹配: {len(vectors)} != {len(chunks)}")
 
-    # 3) PG 先落 chunks（要拿到自增主键），再用同一批 id 写 Milvus
+    # 论文级摘要向量：**先算**，去重要用它（也是 paper_summaries 的内容）
+    summary_text = f"{title}\n\n{paper.get('abstract') or ''}".strip()
+    summary_dense = embedder.encode_dense([summary_text])[0] if summary_text else None
+
+    # 3) 语义去重（写向量之前 —— 理由见模块头）
+    verdict = resolve_duplicate(
+        paper_id,
+        summary_dense,
+        arxiv_id=paper.get("arxiv_id"),
+        version=paper.get("version"),
+    )
+
     chunk_ids = asyncio.run(_persist_chunks(paper_id, chunks))
+
+    fingerprint = semantic_fingerprint(
+        title,
+        paper.get("abstract"),
+        paper.get("authors"),
+        dense_fn=lambda texts: embedder.encode_dense(texts),
+    )
+
+    if verdict.is_duplicate:
+        # 合并：chunks 留在 PG（这一份 PDF 仍可读、可高亮），但不写向量 ——
+        # 向量库里只有正主那一份，检索不会召回两条一样的正文。
+        asyncio.run(
+            _set_paper(
+                paper_id,
+                parsed_status="ready",
+                error=None,
+                duplicate_of=verdict.canonical_paper_id,
+                semantic_hash=semantic_hash(title, paper.get("abstract")),
+            )
+        )
+        asyncio.run(_persist_version(paper_id, paper.get("arxiv_id"), paper.get("version"), fingerprint=fingerprint))
+        logger.info(
+            "去重合并 paper_id={} → canonical={} chunks={} sim={:.4f}",
+            paper_id,
+            verdict.canonical_paper_id,
+            len(chunks),
+            verdict.similarity,
+        )
+        return {
+            "ok": True,
+            "paper_id": paper_id,
+            "parser": doc.parser,
+            "pages": doc.page_count,
+            "chunks": len(chunks),
+            "upserted": 0,
+            "duplicate_of": verdict.canonical_paper_id,
+            "dedup": verdict.as_dict(),
+        }
 
     store = get_store()
     store.ensure_collections()
@@ -134,29 +194,31 @@ def _index_paper_inner(paper_id: int) -> dict[str, Any]:
     )
 
     # 4) 论文级摘要向量（语义去重 + 论文级检索）
-    n_summary = _upsert_summary(paper_id, title, paper.get("abstract"), embedder)
+    n_summary = _upsert_summary(paper_id, summary_dense)
 
     # 5) 参考文献 → 引文边 + 版本谱系
     n_citations = asyncio.run(_persist_citations(paper_id, doc.references))
-    asyncio.run(_persist_version(paper_id, paper.get("arxiv_id"), paper.get("version"), title, paper.get("abstract")))
+    asyncio.run(_persist_version(paper_id, paper.get("arxiv_id"), paper.get("version"), fingerprint=fingerprint))
 
     asyncio.run(
         _set_paper(
             paper_id,
             parsed_status="ready",
             error=None,
+            duplicate_of=None,
             semantic_hash=semantic_hash(title, paper.get("abstract")),
         )
     )
 
     logger.info(
-        "入库完成 paper_id={} parser={} chunks={} upsert={} summary={} citations={}",
+        "入库完成 paper_id={} parser={} chunks={} upsert={} summary={} citations={} dedup={}",
         paper_id,
         doc.parser,
         len(chunks),
         n_upsert,
         n_summary,
         n_citations,
+        verdict.kind,
     )
     return {
         "ok": True,
@@ -168,19 +230,19 @@ def _index_paper_inner(paper_id: int) -> dict[str, Any]:
         "summary_upserted": n_summary,
         "citations": n_citations,
         "embedding_backend": vectors.backend,
+        "dedup": verdict.as_dict(),
     }
 
 
-def _upsert_summary(paper_id: int, title: str, abstract: str | None, embedder: Any) -> int:
-    """摘要向量。`id` 用 paper_id 本身 —— 一篇论文一条摘要，天然是一一对应。"""
-    text = f"{title}\n\n{abstract or ''}".strip()
-    if not text:
-        return 0
-    vec = embedder.encode_dense([text])
-    if not vec:
+def _upsert_summary(paper_id: int, dense: list[float] | None) -> int:
+    """摘要向量。`id` 用 paper_id 本身 —— 一篇论文一条摘要，天然是一一对应。
+
+    向量由调用方算好传进来（去重那一关已经用过它），不在这里重复一次前向。
+    """
+    if not dense:
         return 0
     try:
-        return get_store().upsert_summaries([{"id": paper_id, "paper_id": paper_id, "dense": vec[0]}])
+        return get_store().upsert_summaries([{"id": paper_id, "paper_id": paper_id, "dense": dense}])
     except Exception as exc:  # noqa: BLE001 - 摘要向量是增强项，不该拖垮整篇入库
         logger.warning("论文摘要向量写入失败 paper_id={}: {}", paper_id, exc)
         return 0
@@ -189,8 +251,8 @@ def _upsert_summary(paper_id: int, title: str, abstract: str | None, embedder: A
 async def _persist_chunks(paper_id: int, chunks: list[Any]) -> list[int]:
     """写 chunk 行并返回自增主键（顺序与入参一致）。
 
-    `bbox` 暂为 None：当前解析器（MinerU/PyMuPDF）只吐文本流，不出坐标框。
-    列已经备好，等接入版面模型后直接填，不需要改表。
+    `bbox` 来自版面块（归一化坐标），拿不到时是 None —— 列一直备着，
+    坐标缺失不该阻塞入库，前端只是画不出高亮框。
     """
     async with session_scope() as session:
         await session.execute(delete(Chunk).where(Chunk.paper_id == paper_id))
@@ -199,10 +261,10 @@ async def _persist_chunks(paper_id: int, chunks: list[Any]) -> list[int]:
                 paper_id=paper_id,
                 section=c.section,
                 page=c.page_start,
-                bbox=None,
+                bbox=list(c.bbox) if c.bbox else None,
                 content=c.content,
                 token_count=c.token_count,
-                chunk_type="text",
+                chunk_type=c.chunk_type or "text",
             )
             for c in chunks
         ]
@@ -212,9 +274,17 @@ async def _persist_chunks(paper_id: int, chunks: list[Any]) -> list[int]:
 
 
 async def _persist_version(
-    paper_id: int, arxiv_id: str | None, version: str | None, title: str, abstract: str | None
+    paper_id: int,
+    arxiv_id: str | None,
+    version: str | None,
+    *,
+    fingerprint: str | None = None,
 ) -> None:
-    """记录 arXiv 版本谱系。非 arXiv 论文（没有 arxiv_id）直接跳过。"""
+    """记录 arXiv 版本谱系。非 arXiv 论文（没有 arxiv_id）直接跳过。
+
+    `semantic_hash` 存语义指纹（见 `semantic_dedup.semantic_fingerprint`）：
+    同一篇的两个版本指纹不同，就能回答"v7 到底改没改内容"，而不只是"版本号变了"。
+    """
     if not arxiv_id:
         return
     ver = version or "v1"
@@ -226,14 +296,15 @@ async def _persist_version(
         ).scalar_one_or_none()
         if existing is not None:
             existing.paper_id = paper_id
-            existing.semantic_hash = semantic_hash(title, abstract)
+            if fingerprint:
+                existing.semantic_hash = fingerprint
             return
         session.add(
             PaperVersion(
                 arxiv_id=arxiv_id,
                 version=ver,
                 paper_id=paper_id,
-                semantic_hash=semantic_hash(title, abstract),
+                semantic_hash=fingerprint,
             )
         )
 
@@ -309,10 +380,14 @@ def rebuild_citation_edges(paper_ids: list[int] | None = None) -> dict[str, Any]
 
 
 async def find_duplicate_paper(dense: list[float], threshold: float = 0.95) -> int | None:
-    """用论文级摘要向量做语义去重：返回疑似重复的 paper_id（无则 None）。
+    """**只看相似度**的粗查询：返回疑似重复的 paper_id（无则 None）。
 
     阈值默认 0.95：bge-m3 对同一篇论文的不同版本（v1 vs v2）相似度通常在 0.97 以上，
     而同一主题的两篇不同论文很少超过 0.93 —— 0.95 落在两个分布之间。
+
+    它**不区分"新版本"与"跨库重复"**，所以入库流水线不用它，用的是
+    `semantic_dedup.resolve_duplicate()`（会回表比对 arxiv_id/version 再下结论）。
+    这里保留是因为它只碰 Milvus、不碰 PG，适合做单点探测。
     """
     from app.db.milvus import asearch_summaries
 

@@ -17,6 +17,7 @@ EXPECTED_PATHS = {
     # 论文
     "/api/v1/papers",
     "/api/v1/papers/upload",
+    "/api/v1/papers/batch-upload",
     "/api/v1/papers/{paper_id}",
     "/api/v1/papers/{paper_id}/reindex",
     "/api/v1/papers/{paper_id}/chunks",

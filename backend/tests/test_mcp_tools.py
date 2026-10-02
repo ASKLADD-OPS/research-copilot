@@ -48,6 +48,7 @@ class TestLoadAllTools:
 
         assert {t.name for t in tools} == {
             "arxiv_search",
+            "arxiv_fetch",
             "pubmed_search",
             "semantic_scholar_search",
             "python_exec",
@@ -58,6 +59,10 @@ class TestLoadAllTools:
     async def test_every_tool_is_a_well_formed_langchain_tool(self, mcp_client):
         from langchain_core.tools import BaseTool
 
+        # 每个工具至少要有一个"主参数"，否则模型没法构造 Action Input。
+        # 这里逐个点名，别写成"有 query 就行" —— 那会让 arxiv_fetch（按编号取件）
+        # 这种本来就不该有 query 的工具变成假失败。
+        primary = {"python_exec": "code", "arxiv_fetch": "arxiv_id"}
         for tool in await mcp_client.load_all_mcp_tools():
             assert isinstance(tool, BaseTool), f"{tool} 不是 BaseTool，喂给 create_react_agent 会炸"
             assert tool.name.isidentifier(), f"工具名 {tool.name!r} 不是合法标识符"
@@ -65,7 +70,7 @@ class TestLoadAllTools:
             schema = tool.args_schema.model_json_schema()
             props = schema.get("properties") or {}
             assert props, f"{tool.name} 的参数 schema 是空的，模型没法构造 Action Input"
-            assert "code" in props if tool.name == "python_exec" else "query" in props
+            assert primary.get(tool.name, "query") in props, f"{tool.name} 缺少主参数"
 
     @pytest.mark.unit
     async def test_loaded_tool_actually_executes_through_the_mcp_layer(self, mcp_client):
@@ -76,7 +81,8 @@ class TestLoadAllTools:
 
         out = await toolbox.ainvoke("python_exec", {"code": "print(2 ** 10)"})
         assert out["ok"] is True and out["stdout"].strip() == "1024"
-        assert len(tools) == 5
+        # 5 个外部来源 Server 的工具总数（arXiv 两个：搜索 + 取件）
+        assert len(tools) == 6
 
     @pytest.mark.unit
     async def test_loading_is_cached(self, mcp_client):

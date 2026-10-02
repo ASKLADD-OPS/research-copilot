@@ -9,6 +9,7 @@ from app.schemas.common import CODE_OK, ApiResponse, HealthComponent, HealthRepo
 from app.schemas.graph import GraphAnalysisRequest, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut
 from app.schemas.health import DbHealthReport, StoreHealth
 from app.schemas.paper import (
+    BatchUploadResult,
     ChunkOut,
     PaperCreate,
     PaperDetail,
@@ -43,6 +44,7 @@ __all__ = [
     "ApiResponse",
     "AskRequest",
     "AskResult",
+    "BatchUploadResult",
     "BilingualPair",
     "ChunkOut",
     "CitationOut",
