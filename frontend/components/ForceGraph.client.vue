@@ -167,6 +167,11 @@ function buildOption(): echarts.EChartsCoreOption {
           name: n.title || n.id,
           title: n.title,
           year: n.year,
+          // 这三个是 tooltip 要用的：ECharts 只把传进 data 的字段原样交回给
+          // formatter，漏传就会静默渲染成空 —— 摘要、期刊、总被引会一起消失。
+          venue: n.venue,
+          citation_count: n.citation_count,
+          abstract: n.abstract,
           community: n.community,
           in_degree: n.in_degree,
           out_degree: n.out_degree,
