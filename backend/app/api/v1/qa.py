@@ -25,7 +25,7 @@ from app.api.deps import SessionDep
 from app.core.errors import EmptyRetrievalError, GuardrailBlockedError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
-from app.llm.client import get_llm
+from app.llm.client import usage_delta, usage_snapshot
 from app.llm.streaming import SSE_HEADERS, Event, done_event, error_event, sse, sse_comment
 from app.models import Chunk, Paper, QAHistory
 from app.schemas import (
@@ -296,6 +296,8 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
     from app.agents.graph import get_graph
 
     started = time.perf_counter()
+    # usage 是进程累计，本轮只报增量 —— 见 `app.llm.client.usage_snapshot`
+    usage_base = usage_snapshot()
     initial: dict[str, Any] = {
         "query": payload.query,
         "target_papers": payload.paper_ids,
@@ -350,7 +352,6 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
     faithfulness = (reflection.get("scores") or {}).get("faithfulness") if reflection else None
     # 时间轴只在跨篇对比时排：单篇问答排出来只有一个点，白搭一次查询
     timeline = await build_timeline(session, retrieved) if state.get("intent") == "cross_paper_reasoning" else []
-    usage = get_llm().usage
     latency = int((time.perf_counter() - started) * 1000)
     logger.info("问答完成 intent={} grounding={:.2f} latency={}ms", state.get("intent"), grounding, latency)
 
@@ -392,7 +393,7 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             )
             if payload.debug
             else None,
-            usage=usage.snapshot(),
+            usage=usage_delta(usage_base),
             latency_ms=latency,
             history_id=history_id,
         )
@@ -514,6 +515,7 @@ async def _stream_frames(payload: AskRequest) -> AsyncIterator[str]:
     from app.api.v1 import chat
 
     started = time.perf_counter()
+    usage_base = usage_snapshot()
     merged: dict[str, Any] = {}
     session_id = f"qa-{uuid4().hex[:16]}"
     turn = chat.ChatRequest(query=payload.query, paper_ids=payload.paper_ids, intent=payload.intent)
@@ -546,17 +548,17 @@ async def _stream_frames(payload: AskRequest) -> AsyncIterator[str]:
                     yield sse(event, data)
 
         latency = int((time.perf_counter() - started) * 1000)
-        await chat._close_turn(session_id, run_id, turn, merged, latency)
+        turn_usage = usage_delta(usage_base)
+        await chat._close_turn(session_id, run_id, turn, merged, latency, turn_usage["total_tokens"])
 
         # 已经发过 error 帧的（防护硬拒绝）不再补 done —— 一条流只能有一种收尾
         if merged.get("guardrail_action") == "block":
             return
 
-        usage = get_llm().usage
         yield done_event(
             grounding_ratio=merged.get("grounding_ratio"),
             citations=merged.get("citations") or [],
-            usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
+            usage=turn_usage,
             latency_ms=latency,
             extra=await timeline_done_extra(merged),
         )

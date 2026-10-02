@@ -1,7 +1,18 @@
-"""写作辅助：章节草稿 / 翻译 / 模板清单。
+"""写作辅助。
 
-写作走"检索 → 有据生成"：先取证据再写，并把上下文块交给模型，
-这样写出来的段落天然带可核查的引用编号，而不是漂亮的空话。
+两组东西，共用同一个"有据才写"的原则：
+
+| 端点 | 干什么 | 实现 |
+|---|---|---|
+| `GET /writing/templates`、`POST /writing/draft`、`POST /writing/translate` | 工作台右栏的单段生成 / 翻译 | 本文件 + `agents/mcp/local_tools.py` |
+| `POST /writing/outline` | Idea → 完整论文框架（逐节有据草稿） | `app/writing/outline.py` |
+| `POST /writing/expand` | 段落扩写（带引用偏移） | `app/writing/outline.py` |
+| `POST /writing/references` | 无幻觉 References（逐条校验 + 排表） | `app/writing/references.py` |
+| `POST /writing/diagram` | TikZ / Graphviz / Mermaid / Matplotlib 图 | `app/writing/diagrams.py` |
+
+单段 `draft` 走的是"检索 → 写"两步；框架/扩写多一层**全局引用重编号**（各节分别起草，
+局部编号必须先并成全篇编号才拼得起来），`references` 则是纯粹的机械校验 —— 它一次模型都不调，
+理由写在那个模块头上。
 """
 
 from __future__ import annotations
@@ -15,6 +26,14 @@ from app.api.deps import SessionDep
 from app.schemas import (
     ApiResponse,
     BilingualPair,
+    DiagramRequest,
+    DiagramResult,
+    ExpandRequest,
+    ExpandResult,
+    OutlineRequest,
+    OutlineResult,
+    ReferenceRequest,
+    ReferenceResult,
     TranslateRequest,
     TranslateResult,
     WriteRequest,
@@ -78,8 +97,12 @@ async def templates() -> ApiResponse[list[WritingTemplateOut]]:
 @router.post("/draft", response_model=ApiResponse[WriteResult], summary="生成章节草稿", operation_id="write_draft")
 async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[WriteResult]:
     from app.agents.mcp.local_tools import write_section
+    from app.llm.client import usage_delta, usage_snapshot
     from app.rag.retriever import HybridRetriever, to_context_block
     from app.rag.source_tracing import get_tracer
+
+    # usage 是进程累计，本次只报增量 —— 见 `app.llm.client.usage_snapshot`
+    usage_base = usage_snapshot()
 
     chunks: list[Any] = []
     context = ""
@@ -108,9 +131,6 @@ async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[Write
         grounding = report.grounding_ratio
         citations = [c.to_dict() for c in report.citations]
 
-    from app.llm.client import get_llm
-
-    usage = get_llm().usage
     logger.info("写作完成 kind={} chars={} grounding={:.2f}", payload.kind, len(content), grounding)
     return ApiResponse.ok(
         WriteResult(
@@ -119,7 +139,7 @@ async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[Write
             citations=citations,
             grounding_ratio=grounding,
             retrieved_count=len(chunks),
-            usage={"calls": usage.calls, "total_tokens": usage.total_tokens},
+            usage=usage_delta(usage_base),
         )
     )
 
@@ -129,7 +149,9 @@ async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[Write
 )
 async def translate(payload: TranslateRequest) -> ApiResponse[TranslateResult]:
     from app.agents.mcp.local_tools import translate_text
-    from app.llm.client import get_llm
+    from app.llm.client import usage_delta, usage_snapshot
+
+    usage_base = usage_snapshot()
 
     if payload.bilingual:
         pairs: list[BilingualPair] = []
@@ -142,11 +164,120 @@ async def translate(payload: TranslateRequest) -> ApiResponse[TranslateResult]:
         text = str(out.get("text", ""))
         pairs = []
 
-    usage = get_llm().usage
     return ApiResponse.ok(
         TranslateResult(
             text=text,
             pairs=pairs,
-            usage={"calls": usage.calls, "total_tokens": usage.total_tokens},
+            usage=usage_delta(usage_base),
         )
+    )
+
+
+# ==================================================================== 论文框架
+@router.post(
+    "/outline",
+    response_model=ApiResponse[OutlineResult],
+    summary="从 Idea 生成论文框架",
+    operation_id="write_outline",
+)
+async def outline(payload: OutlineRequest, session: SessionDep) -> ApiResponse[OutlineResult]:
+    """Idea → 章节结构 → 每节检索证据 → Self-Citation 起草 → 全篇重编号 → 参考文献表。
+
+    **慢**：默认六节，每节一次检索 + 一次模型调用（并发上限见 `WRITING_OUTLINE_CONCURRENCY`），
+    实测十几秒到一分钟。不拆成"先给框架再逐节要正文"两个端点，是因为拆开以后
+    全局引用编号就没法统一 —— 各节分开拿到的 `[1]` 指的不是同一篇。
+
+    `draft=false` 只要框架（不检索、不写、不排参考文献），那是几百毫秒的事。
+    """
+    from app.writing.outline import build_outline
+
+    result = await build_outline(session, payload)
+    cited = sum(len(s.citations) for s in result.sections)
+    return ApiResponse.ok(
+        result,
+        message=f"{len(result.sections)} 节 · 引用 {cited} 条 · 参考文献 {len(result.references)} 条"
+        + (f" · 有据率 {result.grounding_ratio:.0%}" if payload.draft else "（仅框架）"),
+    )
+
+
+# ==================================================================== 段落扩写
+@router.post(
+    "/expand",
+    response_model=ApiResponse[ExpandResult],
+    summary="段落扩展",
+    operation_id="write_expand",
+)
+async def expand(payload: ExpandRequest, session: SessionDep) -> ApiResponse[ExpandResult]:
+    """把一段话（或编辑器选区）扩写成正式正文，引用只允许来自本次检索结果。
+
+    返回值里的编号已经按 `marker_offset` 后移过 —— 插到已有正文后面时把
+    "文档当前最大编号"传进来，编号就不会和前面撞车。
+    """
+    from app.writing.outline import expand_paragraph
+
+    result = await expand_paragraph(session, payload)
+    return ApiResponse.ok(
+        result,
+        message=f"扩写 {len(result.text)} 字 · 引用 {len(result.citations)} 条"
+        + (f" · 有据率 {result.grounding_ratio:.0%}" if result.retrieved_count else " · 本轮无可用证据")
+        + (f" · 摘掉幻觉编号 {result.removed_markers}" if result.removed_markers else ""),
+    )
+
+
+# ==================================================================== 无幻觉 References
+@router.post(
+    "/references",
+    response_model=ApiResponse[ReferenceResult],
+    summary="无幻觉 References 生成",
+    operation_id="write_references",
+)
+async def references(payload: ReferenceRequest, session: SessionDep) -> ApiResponse[ReferenceResult]:
+    """逐条校验正文里的引用，再把参考文献表排出来。**全程不调模型**（理由见 `app/writing/references.py`）。
+
+    三关：`chunk_id` 回表存在 → 句子与证据的语义蕴含（NLI / 词法代理 + 数字硬规则）
+    → 作者/年份/会议只从 `papers` 表取。
+    硬失败（编号越界 / chunk 不存在 / 无元数据）的引用按 `remove_invalid` 摘掉或标 `[citation needed]`；
+    **语义不过但证据存在的标成 `weak` 保留下来并在 checks 里说明理由** —— 把近义改写和凭空编造
+    一锅端会让工具没法用，前端把 weak 标灰让人自己核对才是正解。
+
+    `citations` 传「写正文那一步返回的 citations」最稳（编号映射无需重新猜）；
+    不传则按 `query` 重新检索一遍，编号沿用 `to_context_block` 的规则。
+    """
+    from app.writing.references import build_references
+
+    result = await build_references(session, payload)
+    return ApiResponse.ok(
+        result,
+        message=(
+            f"校验 {result.total_markers} 条引用：通过 {result.ok_count}、待核对 {len(result.flagged_markers)}、"
+            f"已处置 {result.invalid_count}"
+        ),
+    )
+
+
+# ==================================================================== 图表
+@router.post(
+    "/diagram",
+    response_model=ApiResponse[DiagramResult],
+    summary="生成架构拓扑图",
+    operation_id="write_diagram",
+)
+async def diagram(payload: DiagramRequest) -> ApiResponse[DiagramResult]:
+    """`tikz` / `graphviz` / `mermaid` / `matplotlib` 四种。
+
+    **任何渲染失败都不算请求失败**：源码一定带回来，`renderer` 与 `warning` 如实说明图是从哪来的、
+    缺了什么。规格里的"后端沙箱执行 → 返回图片 base64"这条契约落在 `image` 字段上
+    （base64 PNG，不含 data: 前缀）；`matplotlib` 那条路刻意改成"约束模型只产出图表规格、
+    绘图代码由我们固定" —— 执行模型写的 Python 是这套系统里唯一能让模型碰到解释器的地方，
+    不值得为一张图留着（详见 `app/writing/diagrams.py` 模块头）。
+    """
+    from app.writing.diagrams import generate_diagram
+
+    result = await generate_diagram(payload)
+    return ApiResponse.ok(
+        result,
+        message=(
+            f"{result.kind} · 渲染器 {result.renderer}"
+            + (f" · 已出图 {len(result.image or '') // 1024}KB(base64) " if result.image else " · 仅源码")
+        ),
     )

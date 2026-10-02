@@ -62,6 +62,11 @@ dependencies = [
     # ---- 图论 ----
     "networkx>=3.4",
 
+    # ---- 图表（写作辅助的 Matplotlib 数据图；Agg 后端，无需显示环境）----
+    # 为什么不复用前端 ECharts：论文要的是能插进稿子的**静态**图，
+    # 交互式 option 落不了纸。
+    "matplotlib>=3.9",
+
     # ---- 工具 ----
     "httpx>=0.28",
     "tenacity>=9.0",

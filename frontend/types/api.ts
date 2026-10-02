@@ -598,3 +598,110 @@ export interface SchedulerStatus {
   /** 实现方式说明（本项目是 in-process asyncio）。 */
   engine: string
 }
+
+// ---------------------------------------------------------------- 写作台（阶段 11）
+/** 大纲里的一节。`draft` 里的 [n] 与 `citations[].marker` 一一对应。 */
+export interface OutlineSection {
+  key: string
+  title: string
+  brief: string
+  points: string[]
+  draft: string
+  citations: Citation[]
+  grounding_ratio: number
+  evidence_count: number
+  /** 模型编造、后端已强制摘掉的引用编号。 */
+  removed_markers: number[]
+}
+
+/** 一条参考文献。所有字段都来自后端 papers 表，没有一个是模型写的。 */
+export interface ReferenceEntry {
+  marker: number
+  paper_id: number | null
+  chunk_id: number | null
+  title: string
+  authors: string[]
+  year: number | null
+  venue: string
+  doi: string
+  arxiv_id: string
+  url: string
+  section: string | null
+  page: number | null
+  quote: string
+  /** 后端排好的条目文本（GB/T 7714 风味）。 */
+  formatted: string
+}
+
+export interface OutlineResult {
+  title: string
+  idea: string
+  language: string
+  rationale: string
+  sections: OutlineSection[]
+  references: ReferenceEntry[]
+  /** 全篇有据率（按实词加权，不是各节平均）。 */
+  grounding_ratio: number
+  phantom_markers: number[]
+  usage: Record<string, number>
+}
+
+export interface ExpandResult {
+  text: string
+  citations: Citation[]
+  grounding_ratio: number
+  retrieved_count: number
+  removed_markers: number[]
+  usage: Record<string, number>
+}
+
+export type ReferenceStatus = 'ok' | 'weak' | 'phantom' | 'chunk_missing' | 'metadata_missing'
+
+/** 一条引用的逐项校验结果。三关各自的布尔值都留出来，界面要能解释"为什么没过"。 */
+export interface CitationCheck {
+  marker: number
+  claim: string
+  chunk_id: number | null
+  paper_id: number | null
+  page: number | null
+  quote: string
+  nli_score: number
+  numbers_ok: boolean
+  chunk_exists: boolean
+  content_consistent: boolean
+  metadata_ok: boolean
+  status: ReferenceStatus
+  reason: string
+}
+
+export interface ReferenceResult {
+  /** 清洗后的正文：硬失败的引用已被摘掉或标成 [citation needed]。 */
+  content: string
+  references: ReferenceEntry[]
+  bibliography: string[]
+  checks: CitationCheck[]
+  total_markers: number
+  ok_count: number
+  invalid_count: number
+  removed_markers: number[]
+  /** 语义不过但证据存在 —— 保留下来、由人核对。 */
+  flagged_markers: number[]
+  grounding_ratio: number
+}
+
+export type DiagramKind = 'tikz' | 'graphviz' | 'mermaid' | 'matplotlib'
+
+export interface DiagramResult {
+  kind: DiagramKind
+  /** DOT / Mermaid / TikZ 源码，或 Matplotlib 的图表规格 JSON。 */
+  source: string
+  caption: string
+  /** base64 PNG（不含 data: 前缀）；没有可用渲染器时为 null。 */
+  image: string | null
+  mime: string
+  /** dot | mmdc | matplotlib | networkx-fallback | none */
+  renderer: string
+  /** 渲染被降级或跳过时的原因。 */
+  warning: string
+  elapsed_ms: number
+}

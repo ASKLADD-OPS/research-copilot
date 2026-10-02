@@ -6,7 +6,7 @@
  * 检索范围（在对话输入框旁，一句话问哪儿就显示哪儿）。
  * 顶栏每多一个控件，下面三栏能用的高度就少一分 —— 这是个工作台，不是门户。
  */
-import { PhArrowsClockwise, PhFileText, PhGraph, PhHeartbeat, PhMagnifyingGlass, PhSparkle, PhArrowCounterClockwise } from '@phosphor-icons/vue'
+import { PhArrowsClockwise, PhFileText, PhGraph, PhHeartbeat, PhMagnifyingGlass, PhPencilLine, PhSparkle, PhArrowCounterClockwise } from '@phosphor-icons/vue'
 import type { MainView } from '~/types/workbench'
 
 const ui = useUiStore()
@@ -86,6 +86,17 @@ onBeforeUnmount(() => {
     >
       <PhMagnifyingGlass :size="12" />
       主题探索
+    </NuxtLink>
+
+    <!-- 写作台。同样是独立页面：一次要跑六节检索 + 六次生成，还要三栏并排看大纲／正文／引用，
+         右栏那 400px 宽装不下。工作台右栏的「写作」标签仍保留，管的是"顺手写一段"这种小事。 -->
+    <NuxtLink
+      to="/app/writing"
+      class="inline-flex h-6.5 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+      title="Idea → 论文框架 → 逐节起草 → 引用校验 → 图表"
+    >
+      <PhPencilLine :size="12" />
+      写作台
     </NuxtLink>
 
     <span class="min-w-0 flex-1" />

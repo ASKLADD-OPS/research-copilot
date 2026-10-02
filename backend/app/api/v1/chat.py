@@ -33,7 +33,7 @@ from app.api.deps import PageDep, SessionDep
 from app.core.errors import GuardrailBlockedError, NotFoundError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
-from app.llm.client import get_llm
+from app.llm.client import usage_delta, usage_snapshot
 from app.llm.streaming import SSE_HEADERS, Event, done_event, error_event, sse, sse_comment
 from app.models import AgentRun
 from app.schemas import ApiResponse, Page, PageMeta
@@ -157,6 +157,8 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
     from app.agents.graph import get_graph
 
     started = time.perf_counter()
+    # usage 是进程累计，本轮只报增量 —— 见 `app.llm.client.usage_snapshot`
+    usage_base = usage_snapshot()
     merged: dict[str, Any] = {}
     session_id = payload.conversation_id or f"chat-{uuid4().hex[:16]}"
 
@@ -190,13 +192,13 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
                     yield sse(event, data)
 
         latency = int((time.perf_counter() - started) * 1000)
-        await _close_turn(session_id, run_id, payload, merged, latency)
+        turn_usage = usage_delta(usage_base)
+        await _close_turn(session_id, run_id, payload, merged, latency, turn_usage["total_tokens"])
 
         # 已经发过 error 帧的（防护硬拒绝）不再补 done —— 一条流只能有一种收尾
         if merged.get("guardrail_action") == "block":
             return
 
-        usage = get_llm().usage
         # 时间轴的组装逻辑与 /qa/stream 共用一份（延迟导入：这两个模块互为上下游，
         # 模块级互相 import 会绕成环）
         from app.api.v1.qa import timeline_done_extra
@@ -204,7 +206,7 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
         yield done_event(
             grounding_ratio=merged.get("grounding_ratio"),
             citations=merged.get("citations") or [],
-            usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
+            usage=turn_usage,
             latency_ms=latency,
             extra=await timeline_done_extra(merged),
         )
@@ -242,10 +244,18 @@ async def _open_turn(session_id: str, payload: ChatRequest) -> int | None:
 
 
 async def _close_turn(
-    session_id: str, run_id: int | None, payload: ChatRequest, merged: dict[str, Any], latency_ms: int
+    session_id: str,
+    run_id: int | None,
+    payload: ChatRequest,
+    merged: dict[str, Any],
+    latency_ms: int,
+    tokens_used: int,
 ) -> None:
-    """收尾：更新 agent_run（轨迹/意图/耗时）+ 落一条 qa_history。全程尽力而为。"""
-    usage = get_llm().usage
+    """收尾：更新 agent_run（轨迹/意图/耗时）+ 落一条 qa_history。全程尽力而为。
+
+    `tokens_used` 由调用方传**本轮增量**（见 `app.llm.client.usage_snapshot`）：这里读不到
+    "本轮"的概念，读 `get_llm().usage` 只会拿到进程累计值。
+    """
     answer = str(merged.get("answer") or "")
     citations = list(merged.get("citations") or [])
     reflection = merged.get("reflection") or {}
@@ -269,7 +279,7 @@ async def _close_turn(
                     run.steps = steps
                     run.intent = merged.get("intent") or run.intent
                     run.status = "succeeded"
-                    run.tokens_used = usage.total_tokens
+                    run.tokens_used = tokens_used
         except Exception as exc:  # noqa: BLE001
             logger.warning("运行记录收尾失败（回答已正常返回）：{}", exc)
 

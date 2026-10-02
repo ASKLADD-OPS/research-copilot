@@ -138,6 +138,20 @@ class Settings(BaseSettings):
     SUBSCRIBE_HOUR: int = 8  # 每天 8:00
     SUBSCRIBE_MINUTE: int = 0
 
+    # ------------------------------------------------------------------ 写作辅助（阶段 11）
+    WRITING_OUTLINE_MAX_SECTIONS: int = 8  # 规划模型多给出章节时保留前几节
+    # 逐节起草的并发上限。每节都要跑一次 bge-m3 编码 + CrossEncoder 重排，全是本地 CPU 活，
+    # 六节一起放出去只会让编码器互相抢核（并发的收益在网络等待上，不在本地算力上）。
+    WRITING_OUTLINE_CONCURRENCY: int = 3
+
+    # 图表渲染器。留空 = 自动探测：PATH 上找 `dot` / `mmdc`，Chrome 找常见安装位置。
+    # 探测不到**不是错误**：matplotlib 自绘；graphviz 退化为 networkx 拓扑草图；
+    # mermaid/tikz 只返回源码（TikZ 本来就该贴进论文的 .tex 里编译）。
+    DIAGRAM_GRAPHVIZ_DOT: str = ""
+    DIAGRAM_MERMAID_CMD: str = ""
+    DIAGRAM_CHROME: str = ""
+    DIAGRAM_TIMEOUT: int = 60  # 单个外部渲染器的墙钟上限
+
     # ------------------------------------------------------------------ LLM
     LLM_PROVIDER: str = "deepseek"
     LLM_API_KEY: str = ""

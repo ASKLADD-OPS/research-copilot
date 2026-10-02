@@ -480,6 +480,31 @@ def get_llm() -> LLMClient:
     return LLMClient()
 
 
+def usage_snapshot() -> dict[str, int]:
+    """`get_llm().usage` 的快照。
+
+    **`get_llm()` 是 `@lru_cache` 单例，它的 `usage` 是进程级累计。**
+    任何"这一轮/这一次花了多少 token"都必须用 `usage_snapshot()` +
+    `usage_delta()` 取增量，不能直接读 `usage.total_tokens` ——
+    那会随服务运行时长单调增长。实测同一进程里连打两次闲聊，`done` 帧分别是
+    481719 / 484886 tokens，差值 3167 才是第二轮的**真实**消耗；
+    直接上报会表现为"问一句闲聊花了 48 万 token"，落库的 `run.tokens_used` 同样失真。
+
+    注：delta 依赖"同一时刻只有一个在跑的轮次"。本机是单人桌面部署，该前提成立；
+    将来若并发跑多路流式，需要改成每请求独立的累加器（ContextVar）。
+    """
+    return get_llm().usage.snapshot()
+
+
+def usage_delta(base: dict[str, int]) -> dict[str, int]:
+    """相对 `usage_snapshot()` 结果的增量，出口统一用这个形状。"""
+    after = get_llm().usage
+    return {
+        "total_tokens": after.total_tokens - base["total"],
+        "calls": after.calls - base["calls"],
+    }
+
+
 __all__ = [
     "ChatResult",
     "LLMClient",
@@ -487,6 +512,9 @@ __all__ = [
     "Role",
     "ToolCall",
     "Usage",
+    "get_llm",
+    "usage_delta",
+    "usage_snapshot",
     "count_tokens",
     "get_llm",
     "resolve_model",
