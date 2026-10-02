@@ -334,9 +334,7 @@ def test_explore_sse_stream_carries_full_trace(client, closed_loop):
     上面那条生成器用例验的是"闭环会产出什么"，这条验的是"它有没有原样穿过 SSE 层"
     （`_explore_frames` 的转发与 `sse()` 的编码）。两者都可能单独坏。
     """
-    res = client.post(
-        "/api/v1/tools/explore", json={"topic": "MoE 专家路由", "max_papers": 6, "max_rounds": 1}
-    )
+    res = client.post("/api/v1/tools/explore", json={"topic": "MoE 专家路由", "max_papers": 6, "max_rounds": 1})
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/event-stream")
 

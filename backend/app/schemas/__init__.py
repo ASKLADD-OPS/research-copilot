@@ -14,7 +14,17 @@ from app.schemas.explore import (
     SubscribeRequest,
     SubscriptionOut,
 )
-from app.schemas.graph import GraphAnalysisRequest, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut
+from app.schemas.graph import (
+    GraphAnalysisRequest,
+    GraphAnalysisResult,
+    GraphBuildRequest,
+    GraphBuildResult,
+    GraphEdge,
+    GraphInsightRequest,
+    GraphInsightResult,
+    GraphNode,
+    GraphOut,
+)
 from app.schemas.health import DbHealthReport, StoreHealth
 from app.schemas.paper import (
     BatchUploadResult,
@@ -62,7 +72,11 @@ __all__ = [
     "ExploreRequest",
     "GraphAnalysisRequest",
     "GraphAnalysisResult",
+    "GraphBuildRequest",
+    "GraphBuildResult",
     "GraphEdge",
+    "GraphInsightRequest",
+    "GraphInsightResult",
     "GraphNode",
     "GraphOut",
     "HealthComponent",

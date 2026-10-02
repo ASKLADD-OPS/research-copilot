@@ -13,8 +13,10 @@ import {
   PhChartLine,
   PhFileText,
   PhFunnel,
+  PhMagicWand,
+  PhCalendarBlank,
 } from '@phosphor-icons/vue'
-import type { AnalysisKind } from '~/types/api'
+import type { AnalysisKind, Survey } from '~/types/api'
 import type { GraphColorBy, GraphLayout } from '~/types/workbench'
 
 const graph = useGraphStore()
@@ -38,10 +40,12 @@ const COLOR_BY: ReadonlyArray<{ value: GraphColorBy; label: string }> = [
 
 const ANALYSES: ReadonlyArray<{ value: AnalysisKind; label: string }> = [
   { value: 'overview', label: '总览' },
+  { value: 'keystones', label: '核心基石' },
   { value: 'pagerank', label: 'PageRank 关键文献' },
   { value: 'communities', label: '社群划分' },
   { value: 'centrality', label: '中心性' },
   { value: 'timeline', label: '时间线' },
+  { value: 'evolution', label: '演化主线' },
   { value: 'paths', label: '两篇之间最短路径' },
 ]
 
@@ -72,6 +76,35 @@ function openNode(paperId: string) {
 function scopeToSelected(paperId: string) {
   library.scopePaperIds = [paperId]
 }
+
+// ---------------------------------------------------------------- 建图 / 综述
+
+/** 建图产出的一句话摘要。放在侧栏常驻，比一闪而过的 toast 有用。 */
+const builtSummary = ref('')
+
+async function buildGraph() {
+  const res = await graph.build({ paperIds: library.scopePaperIds })
+  builtSummary.value = res
+    ? `${res.graph.n_nodes} 节点 / ${res.graph.n_edges} 边 · ${graph.keystones.length} 块基石 · ${graph.timeline.length} 个年份`
+    : ''
+}
+
+const surveyOpen = ref(false)
+/** 已经做过的方向，一行一个 —— 用来把"已经被做完"的未来方向过滤掉。 */
+const resolvedIdeas = ref('')
+
+async function runInsights() {
+  surveyOpen.value = true
+  await graph.insights({
+    paperIds: library.scopePaperIds,
+    resolvedIdeas: resolvedIdeas.value
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  })
+}
+
+const survey = computed<Partial<Survey>>(() => graph.insight?.survey ?? {})
 
 onMounted(() => {
   graph.restoreConfig()
@@ -111,6 +144,28 @@ onMounted(() => {
         重建引文边
       </button>
 
+      <button
+        type="button"
+        :class="btnCls('primary', { size: 'sm' })"
+        :disabled="graph.building"
+        title="构建引用图 + 中心性/社区/基石/演化主线分析，并落一份快照"
+        @click="buildGraph()"
+      >
+        <PhGraph :size="11" :class="{ 'animate-pulse': graph.building }" />
+        {{ graph.building ? '建图中…' : '构建图谱' }}
+      </button>
+
+      <button
+        type="button"
+        :class="btnCls('default', { size: 'sm' })"
+        :disabled="graph.insighting"
+        title="在核心子图上生成领域综述与未来方向"
+        @click="runInsights()"
+      >
+        <PhMagicWand :size="11" :class="{ 'animate-pulse': graph.insighting }" />
+        领域综述
+      </button>
+
       <span class="mx-0.5 h-4 w-px bg-hairline" />
 
       <select
@@ -136,6 +191,7 @@ onMounted(() => {
             :max-page-rank="graph.maxPageRank"
             :max-degree="graph.maxDegree"
             @select="graph.selectNode($event)"
+            @open="openNode"
           />
           <template #fallback>
             <div class="grid h-full place-items-center"><AppSpinner :size="18" /></div>
@@ -170,7 +226,8 @@ onMounted(() => {
           class="pointer-events-none absolute bottom-2.5 left-2.5 flex max-w-[70%] flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-surface/90 px-2 py-1.5 text-2xs text-ink-4 shadow-xs"
         >
           <span class="inline-flex items-center gap-1"><PhCrosshair :size="10" />滚轮缩放 · 拖拽平移</span>
-          <span>点击节点选中</span>
+          <span>单击选中</span>
+          <span>双击进 PDF</span>
           <span>箭头 = 引用方向（citing → cited）</span>
           <span v-if="graph.truncated" class="text-warn">已按度数裁剪到上限</span>
           <span v-if="graph.isolatedCount" class="text-warn">{{ graph.isolatedCount }} 个孤立节点</span>
@@ -251,6 +308,67 @@ onMounted(() => {
           <button type="button" class="text-2xs text-ink-4 hover:text-ink" @click="graph.resetConfig()">
             重置
           </button>
+        </div>
+
+        <div :class="FIELD_CLS">
+          <span :class="LABEL_CLS">
+            <span class="inline-flex items-center gap-1"><PhCalendarBlank :size="10" />年份区间</span>
+          </span>
+          <div class="flex items-center gap-1.5">
+            <input
+              :class="INPUT_CLS"
+              type="number"
+              inputmode="numeric"
+              class="!h-6.5 text-[11.5px]"
+              :placeholder="graph.yearBounds ? String(graph.yearBounds.min) : '起'"
+              :value="graph.yearFrom ?? ''"
+              aria-label="起始年份"
+              @change="graph.setYearRange(($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null, graph.yearTo)"
+            />
+            <span class="text-2xs text-ink-4">–</span>
+            <input
+              :class="INPUT_CLS"
+              type="number"
+              inputmode="numeric"
+              class="!h-6.5 text-[11.5px]"
+              :placeholder="graph.yearBounds ? String(graph.yearBounds.max) : '止'"
+              :value="graph.yearTo ?? ''"
+              aria-label="结束年份"
+              @change="graph.setYearRange(graph.yearFrom, ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null)"
+            />
+          </div>
+          <p class="text-2xs leading-snug text-ink-4">
+            只画这一段年份的论文；没解析出年份的节点在不设限时才显示。
+            <button
+              v-if="graph.yearFrom !== null || graph.yearTo !== null"
+              type="button"
+              class="ml-1 text-brand hover:underline"
+              @click="graph.resetYearRange()"
+            >
+              清除
+            </button>
+          </p>
+        </div>
+
+        <div
+          v-if="builtSummary || graph.keystones.length"
+          class="space-y-1.5 rounded-md border border-hairline bg-sunken px-2 py-2"
+        >
+          <p class="text-2xs font-semibold text-ink-2">核心基石</p>
+          <p v-if="builtSummary" class="text-2xs leading-snug text-ink-4">{{ builtSummary }}</p>
+          <ul class="space-y-1">
+            <li v-for="k in graph.keystones" :key="k.paper_id" class="text-2xs leading-snug">
+              <button
+                type="button"
+                class="text-left text-ink-2 hover:text-brand"
+                :title="k.reason"
+                @click="graph.selectNode(k.paper_id)"
+              >
+                {{ k.title }}
+              </button>
+              <span class="block text-ink-4">{{ k.year ?? '—' }} · 社群 {{ k.community ?? '—' }} · {{ k.reason }}</span>
+            </li>
+          </ul>
         </div>
 
         <div :class="FIELD_CLS">
@@ -377,7 +495,7 @@ onMounted(() => {
     <template #footer>
       <p class="flex items-center gap-1.5 px-2.5 py-1.5 text-2xs text-ink-4">
         <PhChartLine :size="11" />
-        参数会记住（存本机）。后端按度数裁剪到 300 节点，此处只做展示层的再过滤。
+        参数会记住（存本机）。后端按度数裁剪到 300 节点，此处只做展示层的再过滤。双击节点直接进 PDF。
       </p>
     </template>
   </AppPanel>
@@ -397,5 +515,122 @@ onMounted(() => {
       </p>
       <pre class="max-h-[52vh] overflow-auto scroll-slim rounded-md border border-hairline bg-sunken p-2.5 font-mono text-[11.5px] whitespace-pre-wrap text-ink-2">{{ analysisText }}</pre>
     </template>
+  </Modal>
+
+  <!-- 领域综述：时间线 / 社区方法 / 核心贡献 / 未来方向 -->
+  <Modal v-model="surveyOpen" title="领域综述与未来方向" width="760px">
+    <div v-if="graph.insighting" class="flex items-center gap-2 py-6 text-[12.5px] text-ink-3">
+      <AppSpinner :size="14" />
+      正在读图并撰写综述…
+    </div>
+    <p v-else-if="!graph.insight" class="rounded-md bg-bad-soft px-2.5 py-2 text-2xs text-bad">
+      {{ graph.errorMessage || '没有拿到综述结果。' }}
+    </p>
+    <div v-else class="max-h-[62vh] space-y-4 overflow-y-auto scroll-slim pr-1">
+      <p class="text-2xs text-ink-4">
+        核心子图 {{ graph.insight.n_nodes }} 节点 · {{ graph.insight.n_edges }} 边
+        <span v-if="graph.insight.note"> · {{ graph.insight.note }}</span>
+      </p>
+
+      <section v-if="survey.title">
+        <h4 class="text-[13px] font-semibold text-ink">{{ survey.title }}</h4>
+        <p class="mt-1 text-[12.5px] leading-relaxed text-ink-2">{{ survey.overview }}</p>
+      </section>
+
+      <section v-if="survey.timeline?.length">
+        <h5 class="mb-1.5 text-2xs font-semibold text-ink-3">时间线演进</h5>
+        <ol class="space-y-1.5 border-l border-hairline pl-3">
+          <li v-for="t in survey.timeline" :key="t.year + t.milestone" class="relative">
+            <span class="absolute top-1.5 -left-[15px] size-1.5 rounded-full bg-brand" />
+            <p class="text-[12.5px] text-ink">
+              <span class="tabular-nums text-ink-4">{{ t.year }}</span>
+              {{ t.milestone }}
+            </p>
+            <p class="text-2xs text-ink-4">论文 {{ t.paper_ids.join(' / ') }}</p>
+          </li>
+        </ol>
+      </section>
+
+      <section v-if="survey.communities?.length">
+        <h5 class="mb-1.5 text-2xs font-semibold text-ink-3">主题社区的方法路线</h5>
+        <div class="space-y-2">
+          <div v-for="c in survey.communities" :key="c.community" class="rounded-md border border-hairline px-2.5 py-2">
+            <p class="text-[12.5px] font-medium text-ink">
+              #{{ c.community }} {{ c.label }}
+            </p>
+            <p class="mt-0.5 text-2xs leading-relaxed text-ink-2">{{ c.method }}</p>
+            <p class="mt-1 text-2xs text-ink-4">代表论文 {{ c.paper_ids.join(' / ') }}</p>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="survey.core_papers?.length">
+        <h5 class="mb-1.5 text-2xs font-semibold text-ink-3">核心论文贡献</h5>
+        <ul class="space-y-1.5">
+          <li v-for="c in survey.core_papers" :key="c.paper_id" class="text-2xs leading-relaxed">
+            <button
+              type="button"
+              class="font-mono text-brand hover:underline"
+              @click="openNode(c.paper_id)"
+            >
+              {{ c.paper_id }}
+            </button>
+            <span class="text-ink-2"> · {{ c.contribution }}</span>
+          </li>
+        </ul>
+      </section>
+
+      <section v-if="survey.open_problems?.length">
+        <h5 class="mb-1.5 text-2xs font-semibold text-ink-3">开放问题</h5>
+        <ul class="list-inside list-disc space-y-0.5 text-2xs leading-relaxed text-ink-2">
+          <li v-for="p in survey.open_problems" :key="p">{{ p }}</li>
+        </ul>
+      </section>
+
+      <section>
+        <h5 class="mb-1.5 text-2xs font-semibold text-ink-3">未来方向（已过滤已解决的）</h5>
+        <p v-if="!graph.futureIdeas.length" class="text-2xs text-ink-4">没有剩下可提的方向。</p>
+        <div v-else class="space-y-2">
+          <div
+            v-for="idea in graph.futureIdeas"
+            :key="idea.title"
+            class="rounded-md border border-hairline px-2.5 py-2"
+          >
+            <p class="text-[12.5px] font-medium text-ink">
+              {{ idea.title }}
+              <span v-if="idea.from_open_problems" :class="[pillCls('brand'), 'ml-1 align-middle']">源自开放问题</span>
+            </p>
+            <p class="mt-0.5 text-2xs leading-relaxed text-ink-2">{{ idea.rationale }}</p>
+            <p v-if="idea.based_on.length" class="mt-1 text-2xs text-ink-4">依据 {{ idea.based_on.join(' / ') }}</p>
+          </div>
+        </div>
+
+        <details v-if="graph.droppedIdeas.length" class="mt-2">
+          <summary class="cursor-pointer text-2xs text-ink-4">
+            被过滤掉的 {{ graph.droppedIdeas.length }} 个方向（点开看原因）
+          </summary>
+          <ul class="mt-1 space-y-0.5 text-2xs leading-relaxed text-ink-4">
+            <li v-for="d in graph.droppedIdeas" :key="d.idea">
+              <span class="text-ink-3">{{ d.idea }}</span> —— {{ d.reason }}
+            </li>
+          </ul>
+        </details>
+      </section>
+
+      <section>
+        <label :class="LABEL_CLS" for="graph-resolved-ideas">
+          已知已解决的方向（一行一个，用来过滤未来方向）
+        </label>
+        <textarea
+          id="graph-resolved-ideas"
+          v-model="resolvedIdeas"
+          :class="[TEXTAREA_CLS, 'min-h-16']"
+          placeholder="例如：&#10;用对比学习改进检索表示&#10;跨语言检索的表示对齐"
+        />
+        <button type="button" :class="btnCls('default', { size: 'sm' })" class="mt-1.5" @click="runInsights()">
+          用这份清单重新生成
+        </button>
+      </section>
+    </div>
   </Modal>
 </template>

@@ -32,7 +32,11 @@ const props = defineProps<{
   maxDegree: number
 }>()
 
-const emit = defineEmits<{ select: [id: string | null] }>()
+const emit = defineEmits<{
+  select: [id: string | null]
+  /** 双击节点 —— 直接进 PDF 阅读器 */
+  open: [id: string]
+}>()
 
 const el = ref<HTMLElement | null>(null)
 let chart: echarts.ECharts | null = null
@@ -109,12 +113,17 @@ function buildOption(): echarts.EChartsCoreOption {
         if (d.dataType !== 'node') return ''
         const n = d.data
         const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] as string)
+        // 摘要压到 150 字：tooltip 是"扫一眼这篇讲什么"，不是读摘要的地方
+        const abstract = (n.abstract ?? '').trim()
+        const snippet = abstract.length > 150 ? `${abstract.slice(0, 150)}…` : abstract
         return [
           `<b>${esc(n.title || n.id)}</b>`,
+          [n.year ? String(n.year) : '', n.venue ? esc(n.venue) : ''].filter(Boolean).join(' · '),
           `被引 ${n.in_degree} · 引用 ${n.out_degree}`,
-          n.year ? `年份 ${n.year}` : '',
+          n.citation_count != null ? `总被引 ${n.citation_count}` : '',
           n.community != null ? `社群 ${n.community}` : '',
           n.pagerank != null ? `PageRank ${n.pagerank.toFixed(5)}` : '',
+          snippet ? `<span style="opacity:.72">${esc(snippet)}</span>` : '',
         ]
           .filter(Boolean)
           .join('<br/>')
@@ -207,6 +216,12 @@ onMounted(() => {
   chart.on('click', (params: unknown) => {
     const p = params as { dataType: string; data: { id?: string } }
     onSelect(p.dataType === 'node' ? (p.data?.id ?? null) : null)
+  })
+  // 双击 = 直接进 PDF。单击已经用来选中了，再让单击进阅读器会让"看一眼这个节点"
+  // 变成"被迫离开图谱" —— 双击是这两件事共存的唯一分法。
+  chart.on('dblclick', (params: unknown) => {
+    const p = params as { dataType: string; data: { id?: string } }
+    if (p.dataType === 'node' && p.data?.id) emit('open', p.data.id)
   })
   // 点空白处取消选中 —— 否则选中态只能靠再点另一个节点清掉
   chart.getZr().on('click', (e: unknown) => {

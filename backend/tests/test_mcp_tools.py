@@ -51,6 +51,10 @@ class TestLoadAllTools:
             "arxiv_fetch",
             "pubmed_search",
             "semantic_scholar_search",
+            # 阶段 10：引文图的三个数据源（按 id 取单篇 / 参考文献 / 被引记录）
+            "semantic_scholar_paper",
+            "semantic_scholar_references",
+            "semantic_scholar_citations",
             "python_exec",
             "web_search",
         }
@@ -62,7 +66,14 @@ class TestLoadAllTools:
         # 每个工具至少要有一个"主参数"，否则模型没法构造 Action Input。
         # 这里逐个点名，别写成"有 query 就行" —— 那会让 arxiv_fetch（按编号取件）
         # 这种本来就不该有 query 的工具变成假失败。
-        primary = {"python_exec": "code", "arxiv_fetch": "arxiv_id"}
+        primary = {
+            "python_exec": "code",
+            "arxiv_fetch": "arxiv_id",
+            # 按 id 取件的那一批主参数是 paper_id，不是 query
+            "semantic_scholar_paper": "paper_id",
+            "semantic_scholar_references": "paper_id",
+            "semantic_scholar_citations": "paper_id",
+        }
         for tool in await mcp_client.load_all_mcp_tools():
             assert isinstance(tool, BaseTool), f"{tool} 不是 BaseTool，喂给 create_react_agent 会炸"
             assert tool.name.isidentifier(), f"工具名 {tool.name!r} 不是合法标识符"
@@ -81,8 +92,9 @@ class TestLoadAllTools:
 
         out = await toolbox.ainvoke("python_exec", {"code": "print(2 ** 10)"})
         assert out["ok"] is True and out["stdout"].strip() == "1024"
-        # 5 个外部来源 Server 的工具总数（arXiv 两个：搜索 + 取件）
-        assert len(tools) == 6
+        # 5 个外部来源 Server 的工具总数（arXiv 两个：搜索 + 取件；
+        # Semantic Scholar 四个：检索 + 单篇 + 参考文献 + 被引记录）
+        assert len(tools) == 9
 
     @pytest.mark.unit
     async def test_loading_is_cached(self, mcp_client):

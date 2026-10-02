@@ -45,6 +45,13 @@ class Paper(IntPKMixin, CreatedAtMixin, Base):
     version: Mapped[str | None] = mapped_column(String(16))  # v1 / v2 …；非 arXiv 论文为空
     source_url: Mapped[str | None] = mapped_column(Text)  # 落地页 / 下载地址
 
+    # ---- 书目元数据（引文图的节点属性）----
+    # 三项都可空：本地 PDF 不一定解析得出，Semantic Scholar 补全前就是 NULL。
+    # 不用 0 当"未知"占位 —— 引文数 0 是真实语义（确实没人引），必须能和未知区分。
+    year: Mapped[int | None] = mapped_column(Integer, index=True)
+    venue: Mapped[str | None] = mapped_column(String(255))
+    citation_count: Mapped[int | None] = mapped_column(Integer)
+
     # ---- 文件与哈希 ----
     file_path: Mapped[str | None] = mapped_column(Text)
     file_hash: Mapped[str | None] = mapped_column(String(64), index=True)  # 字节级 sha256 → 内容去重

@@ -35,9 +35,12 @@ EXPECTED_PATHS = {
     # 图谱
     "/api/v1/graph",
     "/api/v1/graph/analyze",
+    "/api/v1/graph/build",
+    "/api/v1/graph/insights",
     "/api/v1/graph/rebuild",
     "/api/v1/graph/snapshots",
     "/api/v1/graph/snapshots/{snapshot_id}",
+    "/api/v1/graph/snapshot/{snapshot_id}",
     # 写作
     "/api/v1/writing/templates",
     "/api/v1/writing/draft",

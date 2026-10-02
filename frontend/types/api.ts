@@ -237,8 +237,14 @@ export interface GraphNode {
   id: string
   title: string
   year?: number | null
+  venue?: string
+  citation_count?: number | null
+  /** 摘要前 300 字，hover 卡片用 */
+  abstract?: string
   in_degree: number
   out_degree: number
+  /** 入度 + 出度，后端已经算好；没有时前端用 in+out 兜底 */
+  degree?: number
   community?: number | null
   pagerank?: number | null
 }
@@ -247,6 +253,8 @@ export interface GraphEdge {
   source: string
   target: string
   weight: number
+  /** 引用出现在正文里的片段（可能为空字符串） */
+  context_snippet?: string
 }
 
 export interface GraphOut {
@@ -257,13 +265,112 @@ export interface GraphOut {
   truncated: boolean
 }
 
-export type AnalysisKind = 'overview' | 'pagerank' | 'communities' | 'centrality' | 'paths' | 'timeline'
+export type AnalysisKind =
+  | 'overview'
+  | 'pagerank'
+  | 'communities'
+  | 'centrality'
+  | 'keystones'
+  | 'timeline'
+  | 'evolution'
+  | 'paths'
 
 export interface GraphAnalysisResult {
   analysis: string
   n_nodes: number
   n_edges: number
   result: unknown
+  note: string
+}
+
+/** 核心基石：PageRank top-k 与社区内度数 top-1 的并集。 */
+export interface Keystone {
+  paper_id: string
+  title: string
+  year?: number | null
+  community?: number | null
+  pagerank: number
+  degree: number
+  in_degree: number
+  reason: string
+}
+
+export interface GraphCommunity {
+  community: number
+  size: number
+  papers: { paper_id: string; title: string; year?: number | null; degree: number }[]
+}
+
+export interface GraphTimelineBucket {
+  year: number
+  count: number
+  papers: { paper_id: string; title: string; pagerank: number }[]
+}
+
+export interface GraphMainlineNode {
+  paper_id: string
+  title: string
+  year?: number | null
+  pagerank: number
+}
+
+export interface GraphBuildResult {
+  snapshot_id: number
+  graph: GraphOut
+  keystones: Keystone[]
+  communities: GraphCommunity[]
+  mainline: GraphMainlineNode[]
+  timeline: GraphTimelineBucket[]
+  centrality: Record<string, unknown>
+  enrich_stats: Record<string, number>
+  note: string
+}
+
+// ---- 领域综述（POST /graph/insights）----
+
+export interface SurveyTimelineEntry {
+  year: number
+  milestone: string
+  paper_ids: string[]
+}
+
+export interface SurveyCommunity {
+  community: number
+  label: string
+  method: string
+  paper_ids: string[]
+}
+
+export interface SurveyCorePaper {
+  paper_id: string
+  contribution: string
+}
+
+export interface Survey {
+  title: string
+  overview: string
+  timeline: SurveyTimelineEntry[]
+  communities: SurveyCommunity[]
+  core_papers: SurveyCorePaper[]
+  open_problems: string[]
+}
+
+export interface FutureIdea {
+  title: string
+  rationale: string
+  grounded_in: string[]
+  based_on: string[]
+  from_open_problems: boolean
+}
+
+export interface GraphInsightResult {
+  snapshot_id: number | null
+  n_nodes: number
+  n_edges: number
+  keystones: Keystone[]
+  survey: Partial<Survey>
+  future_ideas: FutureIdea[]
+  dropped_ideas: { idea: string; reason: string }[]
   note: string
 }
 

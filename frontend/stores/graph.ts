@@ -1,4 +1,14 @@
-import type { AnalysisKind, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut } from '~/types/api'
+import type {
+  AnalysisKind,
+  FutureIdea,
+  GraphAnalysisResult,
+  GraphBuildResult,
+  GraphEdge,
+  GraphInsightResult,
+  GraphNode,
+  GraphOut,
+  Keystone,
+} from '~/types/api'
 import type { GraphConfig } from '~/types/workbench'
 
 export const DEFAULT_GRAPH_CONFIG: GraphConfig = {
@@ -23,6 +33,9 @@ const CONFIG_KEY = 'rc-graph-config'
  * 分成两半：`raw` 是后端给的完整图（一成不变），`config` 是"怎么画"。
  * 过滤与着色都在前端算 —— 后端裁剪到 300 节点是性能护栏，不是"数据已经削过了"，
  * 用户想按度数再看一刀是常态，为这个再打一次接口不值。
+ *
+ * 年份区间**不放进 config**：config 是"长相"（会存本机、下次打开还在），
+ * 年份是"这次想看哪一段"的查询条件，混在一起会让用户下次打开时莫名其妙少一半节点。
  */
 export const useGraphStore = defineStore('graph', () => {
   const nodes = ref<GraphNode[]>([])
@@ -34,21 +47,53 @@ export const useGraphStore = defineStore('graph', () => {
 
   const config = ref<GraphConfig>({ ...DEFAULT_GRAPH_CONFIG })
 
+  /** 时间轴过滤。null = 不设限。 */
+  const yearFrom = ref<number | null>(null)
+  const yearTo = ref<number | null>(null)
+
   const selectedNodeId = ref<string | null>(null)
 
   const analysisKind = ref<AnalysisKind>('overview')
   const analysis = ref<GraphAnalysisResult | null>(null)
   const analyzing = ref(false)
 
+  // ---- 建图 / 综述的产出 ----
+  const snapshotId = ref<number | null>(null)
+  const keystones = ref<Keystone[]>([])
+  const mainline = ref<GraphBuildResult['mainline']>([])
+  const timeline = ref<GraphBuildResult['timeline']>([])
+  const building = ref(false)
+
+  const insight = ref<GraphInsightResult | null>(null)
+  const futureIdeas = ref<FutureIdea[]>([])
+  const droppedIdeas = ref<{ idea: string; reason: string }[]>([])
+  const insighting = ref(false)
+
   // ---------------------------------------------------------------- 派生
 
   /** 度数 = 入度 + 出度。筛选与着色都用它，"被引数"单独看会漏掉综述类节点。 */
   function degree(n: GraphNode) {
-    return n.in_degree + n.out_degree
+    return n.degree ?? n.in_degree + n.out_degree
   }
 
-  /** 过了 minDegree 这一刀、真正会画出来的节点。 */
-  const visibleNodes = computed(() => nodes.value.filter((n) => degree(n) >= config.value.minDegree))
+  /** 图里出现过的年份区间 —— 时间轴滑杆的范围就取它。 */
+  const yearBounds = computed(() => {
+    const years = nodes.value.map((n) => n.year).filter((y): y is number => typeof y === 'number')
+    if (!years.length) return null
+    return { min: Math.min(...years), max: Math.max(...years) }
+  })
+
+  function inYearRange(n: GraphNode) {
+    if (typeof n.year !== 'number') return yearFrom.value === null && yearTo.value === null
+    if (yearFrom.value !== null && n.year < yearFrom.value) return false
+    if (yearTo.value !== null && n.year > yearTo.value) return false
+    return true
+  }
+
+  /** 过了 minDegree 与年份两道刀、真正会画出来的节点。 */
+  const visibleNodes = computed(() =>
+    nodes.value.filter((n) => degree(n) >= config.value.minDegree && inYearRange(n)),
+  )
 
   const visibleNodeIds = computed(() => new Set(visibleNodes.value.map((n) => n.id)))
 
@@ -80,21 +125,52 @@ export const useGraphStore = defineStore('graph', () => {
 
   const isEmpty = computed(() => !loading.value && loaded.value && visibleNodes.value.length === 0)
 
+  /** 每个节点连出去的边（按 id 归并）—— 点击展开邻居、hover 看关系都要用。 */
+  const adjacency = computed(() => {
+    const map = new Map<string, { out: GraphEdge[]; in: GraphEdge[] }>()
+    const slot = (id: string) => {
+      let hit = map.get(id)
+      if (!hit) {
+        hit = { out: [], in: [] }
+        map.set(id, hit)
+      }
+      return hit
+    }
+    for (const e of edges.value) {
+      slot(e.source).out.push(e)
+      slot(e.target).in.push(e)
+    }
+    return map
+  })
+
+  /** 点一个节点就把它的邻居拉进"已展开"集合 —— 图太大时逐层看比一次摊开清楚。 */
+  const expanded = ref<Set<string>>(new Set())
+
+  function neighborsOf(id: string): string[] {
+    const slot = adjacency.value.get(id)
+    if (!slot) return []
+    return [...slot.out.map((e) => e.target), ...slot.in.map((e) => e.source)]
+  }
+
   // ---------------------------------------------------------------- 读
+
+  function applyGraph(res: GraphOut) {
+    nodes.value = res.nodes
+    edges.value = res.edges
+    truncated.value = res.truncated
+    loaded.value = true
+    expanded.value = new Set()
+    // 选中的节点可能被重新裁剪掉了
+    if (selectedNodeId.value && !res.nodes.some((n) => n.id === selectedNodeId.value)) {
+      selectedNodeId.value = null
+    }
+  }
 
   async function load(opts: { limit?: number } = {}) {
     loading.value = true
     errorMessage.value = ''
     try {
-      const res = await useApi().get<GraphOut>('/graph', { limit: opts.limit })
-      nodes.value = res.nodes
-      edges.value = res.edges
-      truncated.value = res.truncated
-      loaded.value = true
-      // 选中的节点可能被重新裁剪掉了
-      if (selectedNodeId.value && !res.nodes.some((n) => n.id === selectedNodeId.value)) {
-        selectedNodeId.value = null
-      }
+      applyGraph(await useApi().get<GraphOut>('/graph', { limit: opts.limit }))
     } catch (err) {
       errorMessage.value = (err as Error).message
     } finally {
@@ -112,6 +188,56 @@ export const useGraphStore = defineStore('graph', () => {
       errorMessage.value = (err as Error).message
     } finally {
       loading.value = false
+    }
+  }
+
+  /** 建图 + 图论分析 + 落快照。`enrich` 会去打 Semantic Scholar，默认关。 */
+  async function build(opts: { paperIds?: string[]; enrich?: boolean; limit?: number } = {}) {
+    building.value = true
+    errorMessage.value = ''
+    try {
+      const res = await useApi().post<GraphBuildResult>('/graph/build', {
+        paper_ids: (opts.paperIds ?? []).map(Number).filter((n) => Number.isFinite(n)),
+        limit: opts.limit ?? 20,
+        enrich: opts.enrich ?? false,
+      })
+      snapshotId.value = res.snapshot_id || null
+      keystones.value = res.keystones
+      mainline.value = res.mainline
+      timeline.value = res.timeline
+      if (res.graph?.nodes?.length) applyGraph(res.graph)
+      if (res.note) errorMessage.value = res.note
+      return res
+    } catch (err) {
+      errorMessage.value = (err as Error).message
+      return null
+    } finally {
+      building.value = false
+    }
+  }
+
+  /** 领域综述 + 未来方向。`resolvedIdeas` 是"已经做过的方向"，会被用来过滤。 */
+  async function insights(opts: { paperIds?: string[]; resolvedIdeas?: string[]; withFuture?: boolean } = {}) {
+    insighting.value = true
+    errorMessage.value = ''
+    try {
+      const res = await useApi().post<GraphInsightResult>('/graph/insights', {
+        snapshot_id: snapshotId.value,
+        paper_ids: (opts.paperIds ?? []).map(Number).filter((n) => Number.isFinite(n)),
+        resolved_ideas: opts.resolvedIdeas ?? [],
+        with_future: opts.withFuture ?? true,
+      })
+      insight.value = res
+      futureIdeas.value = res.future_ideas
+      droppedIdeas.value = res.dropped_ideas
+      if (res.note) errorMessage.value = res.note
+      return res
+    } catch (err) {
+      errorMessage.value = (err as Error).message
+      insight.value = null
+      return null
+    } finally {
+      insighting.value = false
     }
   }
 
@@ -140,6 +266,24 @@ export const useGraphStore = defineStore('graph', () => {
 
   function toggleNode(id: string) {
     selectedNodeId.value = selectedNodeId.value === id ? null : id
+  }
+
+  /** 展开一个节点的邻居（把它自己和邻居都标进"已展开"）。 */
+  function expandNode(id: string) {
+    const next = new Set(expanded.value)
+    next.add(id)
+    for (const n of neighborsOf(id)) next.add(n)
+    expanded.value = next
+  }
+
+  function setYearRange(from: number | null, to: number | null) {
+    yearFrom.value = from
+    yearTo.value = to
+  }
+
+  function resetYearRange() {
+    yearFrom.value = null
+    yearTo.value = null
   }
 
   // ---------------------------------------------------------------- 配置
@@ -194,6 +338,18 @@ export const useGraphStore = defineStore('graph', () => {
     loaded,
     errorMessage,
     config,
+    yearFrom,
+    yearTo,
+    yearBounds,
+    snapshotId,
+    keystones,
+    mainline,
+    timeline,
+    building,
+    insight,
+    futureIdeas,
+    droppedIdeas,
+    insighting,
     selectedNodeId,
     selectedNode,
     analysisKind,
@@ -203,17 +359,25 @@ export const useGraphStore = defineStore('graph', () => {
     visibleEdges,
     visibleNodeIds,
     highlighted,
+    adjacency,
+    expanded,
     maxInDegree,
     maxPageRank,
     maxDegree,
     isolatedCount,
     isEmpty,
     degree,
+    neighborsOf,
     load,
     rebuild,
+    build,
+    insights,
     analyze,
     selectNode,
     toggleNode,
+    expandNode,
+    setYearRange,
+    resetYearRange,
     patchConfig,
     resetConfig,
     restoreConfig,
