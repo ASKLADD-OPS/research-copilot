@@ -92,6 +92,16 @@ class IntentUnclearError(AppError):
     code, message = 4002, "意图不明确，需要澄清"
 
 
+class GuardrailBlockedError(AppError):
+    """四层防护的硬拒绝：注入攻击、越权访问、敏感内容、复述系统提示。
+
+    软性问题（有据率低、幻觉引用）不走这里 —— 它们回 synthesizer 重写一次，
+    只有"这条请求根本不该被回答"才用错误码收场。
+    """
+
+    code, message = 4003, "请求被安全防护拦截"
+
+
 class ToolError(AppError):
     code, message = 5001, "外部工具调用失败"
 
@@ -179,6 +189,7 @@ __all__ = [
     "EmptyRetrievalError",
     "GroundingError",
     "AgentError",
+    "GuardrailBlockedError",
     "IntentUnclearError",
     "ToolError",
     "MCPConnectionError",

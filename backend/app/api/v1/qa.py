@@ -19,7 +19,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.api.deps import SessionDep
-from app.core.errors import EmptyRetrievalError
+from app.core.errors import EmptyRetrievalError, GuardrailBlockedError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
 from app.llm.client import get_llm
@@ -218,6 +218,15 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
 
     graph = get_graph()
     state: dict[str, Any] = await graph.ainvoke(initial, config={"configurable": {"thread_id": "rest"}})
+
+    # 防护硬拒绝（注入 / 越权 / 敏感内容）：不回答案、不落库，统一给 {code:4003} 信封。
+    # 软性问题（有据率低、幻觉引用）不在这里 —— 它们在图内回 synthesizer 重写过一轮了。
+    if state.get("guardrail_action") == "block":
+        logger.warning("问答被防护拦截 flags={}", state.get("guardrail_flags"))
+        raise GuardrailBlockedError(
+            str(state.get("answer") or GuardrailBlockedError.message),
+            data={"flags": list(state.get("guardrail_flags") or []), "reason": state.get("error")},
+        )
 
     retrieved = [_chunk_out(c) for c in (state.get("reranked") or state.get("retrieved") or [])]
     await _attach_titles(session, retrieved)

@@ -2,12 +2,12 @@
 
 入口：intent → (clarify | planner)
 主干：planner → executor(ReAct) → replanner → reflector → (refine | synthesizer)
-收尾：synthesizer → guardrails
+收尾：synthesizer → guardrails → (rewrite ↺ synthesizer 一轮 | END)
 """
 
 from app.agents.nodes.clarify import clarify_node
 from app.agents.nodes.executor import executor_node, route_after_execute
-from app.agents.nodes.guardrails import guardrails_node
+from app.agents.nodes.guardrails import guardrails_node, route_after_guardrails
 from app.agents.nodes.intent import intent_node, route_after_intent
 from app.agents.nodes.planner import planner_node, route_after_planner
 from app.agents.nodes.reflector import reflector_node, route_after_reflect
@@ -26,6 +26,7 @@ __all__ = [
     "replanner_node",
     "retriever_node",
     "route_after_execute",
+    "route_after_guardrails",
     "route_after_intent",
     "route_after_planner",
     "route_after_reflect",

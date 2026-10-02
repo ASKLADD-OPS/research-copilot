@@ -125,6 +125,8 @@ class AgentState(TypedDict, total=False):
     answer: str
     clarify_question: str
     guardrail_flags: Annotated[list[str], operator.add]
+    guardrail_action: Literal["pass", "strip", "rewrite", "block"]  # 本节点本轮决策，路由函数据此分流
+    guardrail_passed: bool  # 质量门限是否通过（与 action 解耦：重写到预算用尽仍不达标 → False）
     trace: Annotated[list[dict[str, Any]], operator.add]  # Reflexion 可追踪日志
 
     # ---- 控制 ----

@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     RETRIEVAL_MIN_SCORE: float = 0.0  # 0=关闭低质检索检查（RRF 分值与余弦不可比，需按实测分布标定）
     GUARDRAIL_MAX_INPUT_CHARS: int = 8000
     GUARDRAIL_MAX_OUTPUT_CHARS: int = 20000
+    GUARDRAIL_MAX_INPUT_TOKENS: int = 4000  # 输入 token 上限（粗估：CJK 1 字≈1 token，其余 4 字符≈1）
+    GUARDRAIL_HALLUCINATION_MAX_RATIO: float = 0.34  # 引用中"未被支持"的占比超过它判为幻觉
 
     # ------------------------------------------------------------------ Embedding
     EMBEDDING_BACKEND: Literal["modelscope", "local"] = "modelscope"

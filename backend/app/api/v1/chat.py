@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from app.api.deps import PageDep, SessionDep
-from app.core.errors import NotFoundError
+from app.core.errors import GuardrailBlockedError, NotFoundError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
 from app.llm.client import get_llm
@@ -134,7 +134,12 @@ def _node_events(node: str, update: dict[str, Any]) -> list[tuple[Event, Any]]:
         action = next(
             (str(t.get("action", "")) for t in (update.get("trace") or []) if t.get("node") == "guardrails"), ""
         )
-        out.append((Event.GUARDRAIL, {"action": action, "flags": update.get("guardrail_flags", [])}))
+        if action == "block":
+            # 硬拒绝用 error 帧收场（而不是 guardrail 帧 + done）：前端只认"流以 done 或
+            # error 结束"，多给一帧 done 会让它把拒绝当成一次正常回答。
+            out.append((Event.ERROR, {"code": GuardrailBlockedError.code, "message": str(update.get("answer") or "")}))
+        else:
+            out.append((Event.GUARDRAIL, {"action": action, "flags": update.get("guardrail_flags", [])}))
     return out
 
 
@@ -190,6 +195,10 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
 
         latency = int((time.perf_counter() - started) * 1000)
         await _close_turn(session_id, run_id, payload, merged, latency)
+
+        # 已经发过 error 帧的（防护硬拒绝）不再补 done —— 一条流只能有一种收尾
+        if merged.get("guardrail_action") == "block":
+            return
 
         usage = get_llm().usage
         yield done_event(

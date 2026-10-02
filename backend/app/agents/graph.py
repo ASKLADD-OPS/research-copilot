@@ -28,14 +28,16 @@
                       ┌────────────┐                     │
                       │ guardrails │◀────────────────────┘
                       └──────┬─────┘        pass / verdict!=refine
-                             ▼
-                            END
+                    rewrite ↺│  │ end
+                 (上限 1 轮)  │  ▼
+                             └▶ END
 ```
 
-三处循环都在图上显式表达（不藏进节点内部），便于观测与断言：
+四处循环都在图上显式表达（不藏进节点内部），便于观测与断言：
 1. `executor → executor`：计划内多步
 2. `executor → replanner → executor`：Replan 循环（上限 2）
 3. `reflector → executor`：Refine 循环（上限 2）
+4. `guardrails → synthesizer → guardrails`：防护重写循环（上限 1，软性问题才走）
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from app.agents.nodes import (
     replanner_node,
     retriever_node,
     route_after_execute,
+    route_after_guardrails,
     route_after_intent,
     route_after_reflect,
     route_after_replan,
@@ -171,9 +174,13 @@ def build_graph(
         {"refine": "executor", "synthesizer": "synthesizer"},
     )
 
-    # ---- 收尾 ----
+    # ---- 收尾 + 第四处循环：防护重写（上限 1 轮）----
     g.add_edge("synthesizer", "guardrails")
-    g.add_edge("guardrails", END)
+    g.add_conditional_edges(
+        "guardrails",
+        route_after_guardrails,
+        {"synthesizer": "synthesizer", "end": END},
+    )
 
     cp = checkpointer if checkpointer is not None else (build_checkpointer() if with_checkpointer else None)
     compiled = g.compile(
