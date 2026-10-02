@@ -34,7 +34,7 @@ from app.core.errors import GuardrailBlockedError, NotFoundError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
 from app.llm.client import get_llm
-from app.llm.streaming import Event, done_event, error_event, sse, sse_comment
+from app.llm.streaming import SSE_HEADERS, Event, done_event, error_event, sse, sse_comment
 from app.models import AgentRun
 from app.schemas import ApiResponse, Page, PageMeta
 
@@ -149,11 +149,7 @@ async def stream(payload: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         _stream_frames(payload),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 让 nginx 不缓冲
-        },
+        headers=SSE_HEADERS,
     )
 
 

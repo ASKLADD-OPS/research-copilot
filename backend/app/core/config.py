@@ -121,6 +121,23 @@ class Settings(BaseSettings):
     ARXIV_MAX_PDF_MB: int = 60
     BATCH_UPLOAD_MAX_FILES: int = 20  # 一次批量最多几篇 —— 解析是串行的重活
 
+    # ------------------------------------------------------------------ 主题探索闭环
+    # 闭环由 app/agents/explore.py 实现：检索 → 下载 → 评分 → 反思 → 重规划。
+    EXPLORE_MIN_PAPERS: int = 5  # 硬下限：低于它就一定再搜一轮（验收要求 ≥5）
+    EXPLORE_MAX_PAPERS: int = 8  # 一轮最多下载几篇
+    EXPLORE_MIN_SCORE: float = 0.7  # 相关性阈值（bge-m3 余弦），低于它不进推荐
+    EXPLORE_MAX_ROUNDS: int = 3  # 检索轮次上限（首轮 + 最多 2 次换词重来）
+    EXPLORE_RECALL_K: int = 20  # 每轮每路检索召回多少条候选
+
+    # ------------------------------------------------------------------ 订阅定时抓取
+    # **不用 Celery**（见 pyproject.toml 与 app/indexing/runner.py 的说明）：
+    # 日更任务由 app/workers/scheduler.py 的进程内 asyncio 调度器承担。
+    # 代价与 runner.py 一致：进程重启 = 调度状态丢失，重启后按"下一个 8:00"重算；
+    # 已经抓过的不会重复入库（论文级去重靠 arxiv_id / file_hash）。
+    SUBSCRIBE_ENABLED: bool = True
+    SUBSCRIBE_HOUR: int = 8  # 每天 8:00
+    SUBSCRIBE_MINUTE: int = 0
+
     # ------------------------------------------------------------------ LLM
     LLM_PROVIDER: str = "deepseek"
     LLM_API_KEY: str = ""

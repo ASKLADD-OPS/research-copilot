@@ -13,6 +13,7 @@ __all__ = [
     "count_tokens",
     "complete_structured",
     "extract_json",
+    "SSE_HEADERS",
     "Event",
     "sse",
     "sse_comment",

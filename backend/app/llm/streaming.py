@@ -25,6 +25,16 @@
 两套是并列的，`/chat/stream` 用上面那套、`/qa/stream` 用下面这套 —— 不要往同一条流里
 混着发，前端按事件名分派，混发会让同一段内容被渲染两遍。
 
+第三套是 `/tools/explore`（主题探索闭环，`app/agents/explore.py`）的轨迹协议 ——
+它要的是"每一步想了什么、调了什么、拿到了什么"，所以按 ReAct 三段式发：
+
+    event: thought      data: {"stage": "plan", "text": "...", "round": 1}
+    event: action       data: {"name": "arxiv_search", "args": {...}, "round": 1}
+    event: observation  data: {"name": "...", "ok": true, "n": 20, "text": "..."}
+    event: progress     data: {"stage": "search", "index": 2, "total": 6, "round": 1}
+    event: recommend    data: {"arxiv_id": "...", "score": 0.83, ...}
+    event: done         data: {"topic": "...", "downloaded": 6, "recommendations": [...]}
+
 约定：**任何一条流都必须以 done 或 error 收尾**，前端据此关闭连接与 loading 态。
 """
 
@@ -52,6 +62,12 @@ class Event(StrEnum):
     THINKING = "thinking"
     RETRIEVAL = "retrieval"
     SOURCE = "source"
+    # ---- /tools/explore 的轨迹事件（见模块头第三段）----
+    THOUGHT = "thought"
+    ACTION = "action"
+    OBSERVATION = "observation"
+    PROGRESS = "progress"
+    RECOMMEND = "recommend"
 
 
 def sse(event: Event | str, data: Any) -> str:
@@ -60,6 +76,18 @@ def sse(event: Event | str, data: Any) -> str:
     # data 里可能含换行（正文增量），SSE 要求逐行加 data: 前缀
     body = "\n".join(f"data: {line}" for line in payload.split("\n"))
     return f"event: {event}\n{body}\n\n"
+
+
+#: `StreamingResponse` 该带的响应头。三条缺一不可：
+#: - `no-transform` / `X-Accel-Buffering: no` 让反向代理（nginx）不做缓冲 ——
+#:   否则整条流会被攒到最后一起吐出来，流式就白做了；
+#: - `keep-alive` 让中间设备别按"空闲连接"掐掉长任务期间的连接。
+#: `/chat/stream`、`/qa/stream`、`/tools/explore` 三处共用这一份，别再各写一遍。
+SSE_HEADERS: dict[str, str] = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",  # 让 nginx 不缓冲
+}
 
 
 def sse_comment(text: str) -> str:

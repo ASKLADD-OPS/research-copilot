@@ -6,6 +6,14 @@
 """
 
 from app.schemas.common import CODE_OK, ApiResponse, HealthComponent, HealthReport, Page, PageMeta
+from app.schemas.explore import (
+    ExploreDoneOut,
+    ExploreRequest,
+    RecommendationOut,
+    SchedulerOut,
+    SubscribeRequest,
+    SubscriptionOut,
+)
 from app.schemas.graph import GraphAnalysisRequest, GraphAnalysisResult, GraphEdge, GraphNode, GraphOut
 from app.schemas.health import DbHealthReport, StoreHealth
 from app.schemas.paper import (
@@ -50,6 +58,8 @@ __all__ = [
     "ChunkOut",
     "CitationOut",
     "DbHealthReport",
+    "ExploreDoneOut",
+    "ExploreRequest",
     "GraphAnalysisRequest",
     "GraphAnalysisResult",
     "GraphEdge",
@@ -65,11 +75,15 @@ __all__ = [
     "PaperUpdate",
     "PaperUploadResult",
     "QAHistoryOut",
+    "RecommendationOut",
     "RetrievalDebug",
     "RetrievedChunkOut",
+    "SchedulerOut",
     "SourceSpan",
     "SourceTraceOut",
     "StoreHealth",
+    "SubscribeRequest",
+    "SubscriptionOut",
     "TimelineItem",
     "ToolCallRequest",
     "ToolCallResult",

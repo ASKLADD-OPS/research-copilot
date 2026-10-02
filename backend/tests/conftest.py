@@ -34,6 +34,11 @@ os.environ.setdefault("AUTO_CREATE_TABLES", "false")
 for flag in ("ARXIV", "PUBMED", "SEMANTIC_SCHOLAR", "PYTHON_EXEC", "WEB_SEARCH"):
     os.environ.setdefault(f"MCP_{flag}_ENABLED", "false")
 os.environ.setdefault("MCP_TRANSPORT", "inproc")
+# 定时订阅调度器：单测里不让它起常驻任务。TestClient 会跑 lifespan，
+# 默认开着的话每个用例都会留下一个睡到明早 8:00 的 asyncio 任务 —— 不致命，
+# 但"测试进程里挂着未来 16 小时才醒的任务"是不该默认存在的东西。
+# 需要验证调度逻辑的用例直接调 `scheduler.seconds_until` / `run_due_subscriptions`（都是纯函数/显式调用）。
+os.environ.setdefault("SUBSCRIBE_ENABLED", "false")
 
 import pytest  # noqa: E402
 

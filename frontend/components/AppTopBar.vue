@@ -6,7 +6,7 @@
  * 检索范围（在对话输入框旁，一句话问哪儿就显示哪儿）。
  * 顶栏每多一个控件，下面三栏能用的高度就少一分 —— 这是个工作台，不是门户。
  */
-import { PhArrowsClockwise, PhFileText, PhGraph, PhHeartbeat, PhSparkle, PhArrowCounterClockwise } from '@phosphor-icons/vue'
+import { PhArrowsClockwise, PhFileText, PhGraph, PhHeartbeat, PhMagnifyingGlass, PhSparkle, PhArrowCounterClockwise } from '@phosphor-icons/vue'
 import type { MainView } from '~/types/workbench'
 
 const ui = useUiStore()
@@ -76,6 +76,17 @@ onBeforeUnmount(() => {
     <span class="mx-1 h-4 w-px shrink-0 bg-hairline" />
 
     <Segmented v-model="ui.layout.mainView" :options="VIEWS" size="sm" aria-label="主视图切换" />
+
+    <!-- 主题探索。独立页面而不是第四个主视图：它会占满整屏、有自己的开始与结束，
+         塞进三栏工作台会把"看着原文提问"的空间挤没。 -->
+    <NuxtLink
+      to="/app/tools"
+      class="inline-flex h-6.5 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+      title="给一个主题，让 Agent 自动检索、下载并推荐"
+    >
+      <PhMagnifyingGlass :size="12" />
+      主题探索
+    </NuxtLink>
 
     <span class="min-w-0 flex-1" />
 

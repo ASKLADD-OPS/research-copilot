@@ -147,7 +147,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.MCP_EXPOSE_API:
         _mount_mcp(app)
 
+    # 订阅定时抓取（每天 8:00）。**进程内 asyncio 调度器，不是 Celery** ——
+    # 取舍见 app/workers/scheduler.py 的模块头。起不来不该让服务起不来：
+    # 它是后台增强能力，HTTP 侧照常可用。
+    scheduler_task: asyncio.Task[None] | None = None
+    if settings.SUBSCRIBE_ENABLED:
+        try:
+            from app.workers.scheduler import start_scheduler
+
+            scheduler_task = start_scheduler()
+            logger.info(
+                "订阅调度已启动：每天 {:02d}:{:02d}",
+                settings.SUBSCRIBE_HOUR,
+                settings.SUBSCRIBE_MINUTE,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("订阅调度启动失败（其他功能不受影响）：{}", _brief(exc))
+    else:
+        logger.info("订阅调度已关闭（SUBSCRIBE_ENABLED=false）")
+
     yield
+
+    if scheduler_task is not None:
+        from app.workers.scheduler import stop_scheduler
+
+        await stop_scheduler(scheduler_task)
 
     from app.db.redis import aclose as redis_aclose
 

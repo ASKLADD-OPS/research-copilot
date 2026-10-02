@@ -365,6 +365,12 @@ export type StreamEventName =
   | 'guardrail'
   | 'error'
   | 'done'
+  // ---- /tools/explore 探索闭环（见 backend/app/agents/explore.py 模块头）----
+  | 'thought'
+  | 'action'
+  | 'observation'
+  | 'progress'
+  | 'recommend'
 
 /** `/qa/stream` 的 thinking 帧（stage 决定前端归到哪一类轨迹）。 */
 export interface ThinkingEvent {
@@ -393,4 +399,95 @@ export interface SourceEvent {
 export interface StreamEvent<T = unknown> {
   event: StreamEventName
   data: T
+}
+
+// ---------------------------------------------------------------- 主题探索闭环
+// 与 backend/app/schemas/explore.py 对应。事件名见 explore.py 的模块头。
+export interface ExploreThought {
+  stage: string
+  text: string
+  round: number
+}
+
+export interface ExploreAction {
+  name: string
+  args: Record<string, unknown>
+  round: number
+}
+
+export interface ExploreObservation {
+  name: string
+  ok: boolean
+  text: string
+  /** 其余都是各步骤自带的附加字段（n / new / score / paper_id / verdict…）。 */
+  [key: string]: unknown
+}
+
+export interface ExploreProgress {
+  stage: string
+  /** 1-based，分母固定为 6（STAGES）。 */
+  index: number
+  total: number
+  round: number
+  detail: string
+}
+
+export interface Recommendation {
+  arxiv_id: string | null
+  paper_id: number | null
+  title: string
+  authors: string[]
+  year: number | null
+  venue: string
+  url: string
+  source: string
+  /** 与主题的 bge-m3 余弦相似度，0~1。 */
+  score: number
+  citation_count: number
+  abstract: string
+  downloaded: boolean
+  note: string
+}
+
+export interface ExploreDone {
+  topic: string
+  rounds: number
+  searched: number
+  scored: number
+  downloaded: number
+  /** 其中本次新入库的篇数。 */
+  new: number
+  passed: number
+  min_score: number
+  quality: number
+  verdict: string
+  critique: string
+  recommendations: Recommendation[]
+  elapsed_ms: number
+}
+
+// ---------------------------------------------------------------- 订阅 / 调度
+export interface Subscription {
+  id: number
+  topic: string
+  max_papers: number
+  min_score: number
+  enabled: boolean
+  last_run_at: string | null
+  /** pending | running | ok | failed */
+  last_status: string
+  last_error: string | null
+  /** 上一次抓取新入库的篇数。 */
+  last_new: number
+  total_new: number
+  created_at: string | null
+}
+
+export interface SchedulerStatus {
+  enabled: boolean
+  hour: number
+  minute: number
+  next_run_at: string | null
+  /** 实现方式说明（本项目是 in-process asyncio）。 */
+  engine: string
 }

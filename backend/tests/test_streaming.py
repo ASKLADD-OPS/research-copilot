@@ -43,11 +43,19 @@ def parse_frame(frame: str) -> tuple[str, str]:
 
 @pytest.mark.unit
 def test_event_enum_covers_the_documented_protocol():
-    """两套协议并存：细粒度那套给 `/chat/stream`，归并那套给 `/qa/stream`。
+    """三套协议并存，各有各的消费方。
 
-    归并（thinking / retrieval / source）不是"多余的事件名"——前端要按事件名分派四种
-    渲染样式，把 intent/plan/replan/reflection 四种轨迹各自发一遍，客户端就得知道
-    这四种其实是同一类。归并在服务端做一次，比在客户端做四次判断划算。
+    - 细粒度那套给 `/chat/stream`（intent/plan/tool/reflection/...）；
+    - 归并那套给 `/qa/stream`（thinking/retrieval/source）——归并（thinking / retrieval / source）
+      不是"多余的事件名"：前端要按事件名分派四种渲染样式，把 intent/plan/replan/reflection
+      四种轨迹各自发一遍，客户端就得知道这四种其实是同一类。归并在服务端做一次，
+      比在客户端做四次判断划算；
+    - 探索轨迹那套给 `/tools/explore`（thought/action/observation/progress/recommend），
+      见 `app/agents/explore.py` 的模块头。前端 `pages/app/tools/index.vue` 按事件名
+      分派成 Thought / Action / Observation 三段式。
+
+    这个断言的作用是"新增事件必须在这里登记"——协议是前后端之间唯一的契约，
+    悄悄多一个事件名意味着有一端在猜。
     """
     assert {e.value for e in Event} == {
         # /chat/stream
@@ -66,6 +74,12 @@ def test_event_enum_covers_the_documented_protocol():
         "thinking",
         "retrieval",
         "source",
+        # /tools/explore 的探索轨迹
+        "thought",
+        "action",
+        "observation",
+        "progress",
+        "recommend",
     }
 
 
