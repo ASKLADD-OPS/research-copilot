@@ -201,11 +201,16 @@ async def _stream_frames(payload: ChatRequest) -> AsyncIterator[str]:
             return
 
         usage = get_llm().usage
+        # 时间轴的组装逻辑与 /qa/stream 共用一份（延迟导入：这两个模块互为上下游，
+        # 模块级互相 import 会绕成环）
+        from app.api.v1.qa import timeline_done_extra
+
         yield done_event(
             grounding_ratio=merged.get("grounding_ratio"),
             citations=merged.get("citations") or [],
             usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
             latency_ms=latency,
+            extra=await timeline_done_extra(merged),
         )
     except Exception as exc:  # noqa: BLE001 - 任何异常都要以 error 帧收尾，前端才不会卡
         logger.exception("流式对话失败 session={}", session_id)

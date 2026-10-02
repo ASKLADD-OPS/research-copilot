@@ -1,4 +1,14 @@
-import type { ChatMessage, Citation, Conversation, ConversationDetail, IntentKind, PlanStep, Reflection } from '~/types/api'
+import type {
+  ChatMessage,
+  Citation,
+  Conversation,
+  ConversationDetail,
+  IntentKind,
+  PlanStep,
+  Reflection,
+  ThinkingEvent,
+  TimelineItem,
+} from '~/types/api'
 import type { ReaderSelection } from '~/types/workbench'
 
 export interface ToolTraceItem {
@@ -59,6 +69,8 @@ export const useChatStore = defineStore('chat', () => {
   const groundingRatio = ref<number | null>(null)
   const usage = ref<Record<string, number>>({})
   const latencyMs = ref<number | null>(null)
+  /** 跨篇对比的方法演进时间轴。单篇问答后端给空表，这里也就没有内容可画。 */
+  const timeline = ref<TimelineItem[]>([])
 
   /** 本轮回答正文。单独拎出来是为了让 token 追加只改一个字符串，避免整表重渲染。 */
   const answer = ref('')
@@ -90,6 +102,7 @@ export const useChatStore = defineStore('chat', () => {
     groundingRatio.value = null
     usage.value = {}
     latencyMs.value = null
+    timeline.value = []
     answer.value = ''
   }
 
@@ -234,6 +247,39 @@ export const useChatStore = defineStore('chat', () => {
               if (!dup) citations.value.push(cite)
               break
             }
+            case 'thinking': {
+              // /qa/stream 把 intent/plan/reflection/replan 归并成 thinking（带 stage）
+              const d = evt.data as ThinkingEvent
+              if (d.stage === 'plan') plan.value = (d.steps ?? []).slice()
+              else if (d.stage === 'clarify') clarifyQuestion.value = d.question || ''
+              else if (d.stage === 'intent' && d.intent) {
+                intent.value = { intent: d.intent as IntentKind, confidence: d.confidence ?? 0 }
+              } else if (d.stage === 'replan') replanNote.value = d.decision || ''
+              else if (d.stage === 'reflection' && d.scores) {
+                reflections.value.push({
+                  round: reflections.value.length + 1,
+                  scores: d.scores as Reflection['scores'],
+                  overall: d.overall,
+                  verdict: d.verdict,
+                })
+              }
+              break
+            }
+            case 'retrieval': {
+              const d = evt.data as { name: string; status: string; n?: number; crag_level?: string }
+              if (d?.name) {
+                pushTool({
+                  name: d.name,
+                  status: d.status || 'done',
+                  detail: d.crag_level ? `CRAG=${d.crag_level} · 命中 ${d.n ?? 0} 块` : undefined,
+                })
+              }
+              break
+            }
+            case 'source':
+              // source 帧与 citation 帧同源（都是同一条引用），字段已被上面的 citation 收下，
+              // 这里刻意不重复收集 —— 两个真相源迟早会不一致。
+              break
             case 'reflection':
               reflections.value.push(evt.data as Reflection)
               break
@@ -250,10 +296,12 @@ export const useChatStore = defineStore('chat', () => {
                 grounding_ratio?: number
                 usage?: Record<string, number>
                 latency_ms?: number
+                timeline?: TimelineItem[]
               }
               groundingRatio.value = d.grounding_ratio ?? null
               usage.value = d.usage ?? {}
               latencyMs.value = d.latency_ms ?? null
+              timeline.value = d.timeline ?? []
               break
             }
             case 'error': {
@@ -275,6 +323,8 @@ export const useChatStore = defineStore('chat', () => {
             intent: intent.value?.intent ?? null,
             citations: citations.value.slice(),
             grounding_ratio: groundingRatio.value,
+            // 忠实度取自最后一次评审的分数：done 帧里没带它，而评审可能一次都没跑
+            faithfulness: reflections.value.at(-1)?.scores?.faithfulness ?? null,
           })
           sending.value = false
           void loadConversations()
@@ -324,6 +374,7 @@ export const useChatStore = defineStore('chat', () => {
     groundingRatio,
     usage,
     latencyMs,
+    timeline,
     answer,
     hasTrace,
     citationByMarker,

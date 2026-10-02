@@ -1,5 +1,5 @@
 import type { PaperChunk, PaperDetail } from '~/types/api'
-import type { ReaderSelection, ReaderTarget } from '~/types/workbench'
+import type { NormRect, ReaderSelection, ReaderTarget } from '~/types/workbench'
 
 /**
  * 自增的跳转序号。
@@ -78,10 +78,15 @@ export const useSelectionStore = defineStore('selection', () => {
     }
   }
 
-  /** 选中并跳到某页。引用角标、图谱节点、划词追问都走这里。 */
-  async function openAt(paperId: string, pageNum: number, quote?: string) {
+  /**
+   * 选中并跳到某页。引用角标、溯源列表、图谱节点、划词追问都走这里。
+   *
+   * `rects` 是后端溯源带的 bbox（已归一化）—— 有它阅读器就直接画框，
+   * 没有才退回按 `quote` 文字匹配。
+   */
+  async function openAt(paperId: string, pageNum: number, quote?: string, rects?: NormRect[]) {
     await select(paperId)
-    target.value = { paperId, page: pageNum, quote, nonce: ++targetSeq }
+    target.value = { paperId, page: pageNum, quote, rects, nonce: ++targetSeq }
   }
 
   /** 只跳页，不换文档。用于阅读器自己的翻页与"返回上次位置"。 */

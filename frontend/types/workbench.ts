@@ -62,12 +62,16 @@ export interface ReaderSelection {
  *
  * `nonce` 是关键：同一条引用被点两次时，page 与 quote 都没变，
  * 光靠 watch 前两个字段不会触发第二次滚动。每次都换一个 nonce 才能保证"点了就跳"。
+ *
+ * `rects` 优先于 `quote`：后端溯源带 bbox 时直接按坐标画框（准确），
+ * 没有 bbox 才退回按文字匹配（见 PdfCanvas 的 revealQuote）。
  */
 export interface ReaderTarget {
   paperId: string
   /** 1-based */
   page: number
   quote?: string
+  rects?: NormRect[]
   nonce: number
 }
 

@@ -12,6 +12,19 @@
     event: error      data: {"code": 3002, "message": "..."}
     event: done       data: {"grounding_ratio": 0.87, "usage": {...}}
 
+`/qa/stream` 另有一套更粗的对外事件名（规格约定），由 `app/api/v1/qa.py` 的
+`_qa_events` 产出 —— 它把上面这些细粒度事件归并成前端真正要分四种样式渲染的类别：
+
+    event: thinking  data: {"stage": "intent|plan|reflection|replan", ...}
+    event: retrieval data: {"name": "...", "status": "...", "n": 8, "crag_level": "..."}
+    event: citation  data: {"marker": 1, "chunk_id": 77, ...}
+    event: source    data: {"paper_id": 3, "page": 5, "chunk_id": 77, "bbox": [...]}
+    event: token     data: {"text": "..."}
+    event: done      data: {"grounding_ratio": 0.87, "timeline": [...]}
+
+两套是并列的，`/chat/stream` 用上面那套、`/qa/stream` 用下面这套 —— 不要往同一条流里
+混着发，前端按事件名分派，混发会让同一段内容被渲染两遍。
+
 约定：**任何一条流都必须以 done 或 error 收尾**，前端据此关闭连接与 loading 态。
 """
 
@@ -35,6 +48,10 @@ class Event(StrEnum):
     GUARDRAIL = "guardrail"
     ERROR = "error"
     DONE = "done"
+    # ---- /qa/stream 的对外事件（见模块头第二段）----
+    THINKING = "thinking"
+    RETRIEVAL = "retrieval"
+    SOURCE = "source"
 
 
 def sse(event: Event | str, data: Any) -> str:
@@ -78,6 +95,7 @@ def done_event(
     citations: Iterable[dict[str, Any]] | None = None,
     usage: dict[str, Any] | None = None,
     latency_ms: int | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {}
     if grounding_ratio is not None:
@@ -88,6 +106,10 @@ def done_event(
         payload["usage"] = usage
     if latency_ms is not None:
         payload["latency_ms"] = latency_ms
+    # 收尾帧是唯一能保证"一定发出去"的帧，所以需要跟答案一起交付的附加数据
+    # （如跨篇对比的时间轴）挂在这里，不另开一个可能被中途掐断的事件。
+    if extra:
+        payload.update(extra)
     return sse(Event.DONE, payload)
 
 

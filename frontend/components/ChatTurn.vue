@@ -6,7 +6,8 @@
  * 不该被解析成 Markdown，他打了个 `#` 就该看到 `#`。
  */
 import { PhUser } from '@phosphor-icons/vue'
-import type { ChatMessage, Citation } from '~/types/api'
+import { pageStart, type ChatMessage, type Citation } from '~/types/api'
+import { rectsFromBbox } from '~/utils/ui'
 
 const props = withDefaults(
   defineProps<{ message: ChatMessage; streaming?: boolean; isLast?: boolean }>(),
@@ -48,7 +49,8 @@ function onContentClick(e: MouseEvent) {
   ).find((c) => c.marker === marker)
   if (!cite) return
   ui.setMainView('reader')
-  void selection.openAt(cite.paper_id, cite.page_start ?? 1, cite.quote)
+  // 有 bbox 就按坐标框（精确），没有才退回按 quote 文字找
+  void selection.openAt(cite.paper_id, pageStart(cite) ?? 1, cite.quote, rectsFromBbox(cite.bbox))
 }
 </script>
 
@@ -71,16 +73,24 @@ function onContentClick(e: MouseEvent) {
       <div v-if="!streaming && !message.content" class="text-2xs text-ink-4">（本次回答为空）</div>
 
       <div v-if="citations.length" class="mt-2 border-t border-hairline pt-2">
-        <p class="mb-1 flex items-center gap-1.5 text-2xs font-medium text-ink-3">
-          引用 {{ citations.length }}
+        <p class="mb-1 flex flex-wrap items-center gap-1.5 text-2xs font-medium text-ink-3">
+          溯源 {{ citations.length }}
           <span v-if="message.grounding_ratio != null" :class="pillCls(groundingTone(message.grounding_ratio))">
             有据率 {{ (message.grounding_ratio * 100).toFixed(0) }}%
+          </span>
+          <span v-if="message.faithfulness != null" :class="pillCls(groundingTone(message.faithfulness))">
+            忠实度 {{ (message.faithfulness * 100).toFixed(0) }}%
           </span>
           <span v-if="message.intent" :class="pillCls('brand')">
             {{ INTENT_LABEL[message.intent as keyof typeof INTENT_LABEL] ?? message.intent }}
           </span>
         </p>
-        <CitationList :citations="citations" />
+        <SourceTrace :citations="citations" />
+      </div>
+
+      <!-- 跨篇对比才有时间轴：单篇排出来只有一个点，白占一块地方 -->
+      <div v-if="isLast && chat.timeline.length" class="mt-2">
+        <TimelineChart :items="chat.timeline" />
       </div>
 
       <!-- 轨迹只属于最后一条：历史回合的 plan/tools 没有留档，不假装有 -->

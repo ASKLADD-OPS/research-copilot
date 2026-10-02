@@ -161,8 +161,8 @@ async function render() {
   await tl.render()
   if (token !== renderToken) return
 
-  // 换页/换缩放后把上一次的引用定位重放一遍，否则点完引用一缩放高亮就没了
-  if (props.target?.quote && props.target.page === props.page) revealQuote(props.target.quote)
+  // 换页/换缩放后把上一次的定位重放一遍，否则点完引用一缩放高亮就没了
+  if (props.target && props.target.page === props.page) replayTarget(props.target)
 }
 
 // ---------------------------------------------------------------- 划词
@@ -258,6 +258,24 @@ function revealQuote(quote: string) {
   }
 }
 
+/** 按坐标画框并把它滚到视野中间。 */
+function highlightByRects(rects: NormRect[]) {
+  if (!rects.length) return
+  highlightRects.value = rects
+  const scrollerEl = scroller.value
+  const pageBox = pageEl.value?.getBoundingClientRect()
+  if (!scrollerEl || !pageBox) return
+  const first = rects[0]
+  const top = pageBox.top - scrollerEl.getBoundingClientRect().top + (first.y + first.h / 2) * pageBox.height
+  scrollerEl.scrollTo({ top: Math.max(0, top - scrollerEl.clientHeight / 2), behavior: 'smooth' })
+}
+
+/** 重放一次定位指令：有 bbox 坐标走坐标，否则退回按 quote 文字匹配。 */
+function replayTarget(t: ReaderTarget) {
+  if (t.rects?.length) highlightByRects(t.rects)
+  else if (t.quote) revealQuote(t.quote)
+}
+
 function rectStyle(r: NormRect) {
   return {
     left: `${r.x * 100}%`,
@@ -269,21 +287,21 @@ function rectStyle(r: NormRect) {
 
 // ---------------------------------------------------------------- 副作用
 
-/** 跨页跳转时，quote 要等新页渲染完才找得到，先存下来。 */
-const pendingQuote = ref('')
+/** 跨页跳转时，定位指令要等新页渲染完才用得上，先存下来。 */
+const pendingTarget = ref<ReaderTarget | null>(null)
 
-/** 外部跳转：page 变了就翻页，quote 有就再定位一次。 */
+/** 外部跳转：page 变了就翻页，同页则直接定位一次。 */
 watch(
   () => props.target?.nonce,
   () => {
     const t = props.target
     if (!t || t.paperId !== props.paperId) return
     if (t.page !== props.page) {
-      // 翻页由 page 变化触发 render，render 结束时自己会 revealQuote
-      pendingQuote.value = t.quote ?? ''
+      // 翻页由 page 变化触发 render，render 结束时自己会重放定位
+      pendingTarget.value = t
       emit('update:page', t.page)
-    } else if (t.quote) {
-      revealQuote(t.quote)
+    } else {
+      replayTarget(t)
     }
   },
 )
@@ -293,9 +311,9 @@ watch(
   () => {
     highlightRects.value = []
     void render().then(() => {
-      if (pendingQuote.value) {
-        revealQuote(pendingQuote.value)
-        pendingQuote.value = ''
+      if (pendingTarget.value) {
+        replayTarget(pendingTarget.value)
+        pendingTarget.value = null
       }
     })
   },

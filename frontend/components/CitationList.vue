@@ -6,7 +6,8 @@
  * 用户不该"相信"有据率这个数字，而该能一键去核对。
  */
 import { PhArrowSquareOut, PhCheckCircle, PhFileText, PhWarningCircle } from '@phosphor-icons/vue'
-import type { Citation } from '~/types/api'
+import { pageStart, type Citation } from '~/types/api'
+import { rectsFromBbox } from '~/utils/ui'
 
 const props = withDefaults(defineProps<{ citations: Citation[]; compact?: boolean }>(), {
   compact: false,
@@ -18,14 +19,14 @@ const ui = useUiStore()
 function open(c: Citation) {
   // 换到阅读器再跳：用户点引用的意图就是"看原文"，留在图谱页等于没反应
   ui.setMainView('reader')
-  void selection.openAt(c.paper_id, c.page_start ?? 1, c.quote)
+  // 有 bbox 就按坐标框（精确），没有才退回按 quote 文字找
+  void selection.openAt(c.paper_id, pageStart(c) ?? 1, c.quote, rectsFromBbox(c.bbox))
 }
 
 const pageLabel = (c: Citation) => {
-  if (c.page_start == null) return ''
-  return c.page_end && c.page_end !== c.page_start
-    ? `p.${c.page_start}–${c.page_end}`
-    : `p.${c.page_start}`
+  const start = pageStart(c)
+  if (start == null) return ''
+  return c.page_end && c.page_end !== start ? `p.${start}–${c.page_end}` : `p.${start}`
 }
 </script>
 

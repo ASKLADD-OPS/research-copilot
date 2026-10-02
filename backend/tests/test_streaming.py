@@ -43,7 +43,14 @@ def parse_frame(frame: str) -> tuple[str, str]:
 
 @pytest.mark.unit
 def test_event_enum_covers_the_documented_protocol():
+    """两套协议并存：细粒度那套给 `/chat/stream`，归并那套给 `/qa/stream`。
+
+    归并（thinking / retrieval / source）不是"多余的事件名"——前端要按事件名分派四种
+    渲染样式，把 intent/plan/replan/reflection 四种轨迹各自发一遍，客户端就得知道
+    这四种其实是同一类。归并在服务端做一次，比在客户端做四次判断划算。
+    """
     assert {e.value for e in Event} == {
+        # /chat/stream
         "intent",
         "clarify",
         "plan",
@@ -55,7 +62,21 @@ def test_event_enum_covers_the_documented_protocol():
         "guardrail",
         "error",
         "done",
+        # /qa/stream 的归并事件
+        "thinking",
+        "retrieval",
+        "source",
     }
+
+
+@pytest.mark.unit
+def test_done_event_carries_extra_payload():
+    """收尾帧是唯一"一定发得出去"的帧，跨篇时间轴等附加数据挂在这里。"""
+    name, data = parse_frame(done_event(grounding_ratio=0.9, extra={"timeline": [{"year": 2021}]}))
+    assert name == "done"
+    assert json.loads(data)["timeline"] == [{"year": 2021}]
+    # 不传 extra 时不能凭空多出 timeline 字段
+    assert "timeline" not in json.loads(parse_frame(done_event(grounding_ratio=0.9))[1])
 
 
 @pytest.mark.unit

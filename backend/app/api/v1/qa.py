@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import select
 
@@ -23,6 +26,7 @@ from app.core.errors import EmptyRetrievalError, GuardrailBlockedError
 from app.db.bootstrap import ensure_default_user
 from app.db.session import session_scope
 from app.llm.client import get_llm
+from app.llm.streaming import Event, done_event, error_event, sse, sse_comment
 from app.models import Chunk, Paper, QAHistory
 from app.schemas import (
     ApiResponse,
@@ -33,6 +37,7 @@ from app.schemas import (
     RetrievalDebug,
     RetrievedChunkOut,
     SourceTraceOut,
+    TimelineItem,
     TraceRequest,
     TraceResult,
 )
@@ -87,6 +92,89 @@ async def _attach_titles(session: Any, rows: list[RetrievedChunkOut]) -> None:
     titles = dict((await session.execute(select(Paper.id, Paper.title).where(Paper.id.in_(ids)))).all())
     for row in rows:
         row.title = str(titles.get(row.paper_id, "") or "")
+
+
+# ------------------------------------------------------------------ 时间线
+# arXiv 编号自带 YYMM：新式 `2301.12345`、老式 `cs.CL/0701001`。
+# 老式分类名里可以有点（cs.CL）和数字（cs1），所以字符类比 `[a-z-]` 宽一点。
+_ARXIV_NEW_RE = re.compile(r"^(\d{2})(\d{2})\.")
+_ARXIV_OLD_RE = re.compile(r"^[a-z][a-z0-9.-]*/(\d{2})(\d{2})")
+
+
+def year_from_arxiv(arxiv_id: str | None) -> int | None:
+    """从 arXiv 编号前缀推发表年份。纯函数，不联网。
+
+    `papers` 表里没有 year 列 —— 而"方法演进"这条线离不开年份。arXiv 编号是
+    **唯一免费且不会幻觉**的来源；推不出（非 arXiv 论文）就给 None，前端不画这个点，
+    好过编一个年份出来。
+    """
+    text = (arxiv_id or "").strip().lower()
+    for pattern in (_ARXIV_OLD_RE, _ARXIV_NEW_RE):
+        match = pattern.match(text)
+        if match is None:
+            continue
+        yy, mm = int(match.group(1)), int(match.group(2))
+        if 1 <= mm <= 12:
+            # arXiv 1991 年开张：91-99 归 1900s，00-90 归 2000s
+            return 1900 + yy if yy >= 91 else 2000 + yy
+    return None
+
+
+def _as_int(value: Any) -> int | None:
+    """宽松转 int：state 里的 id 是字符串，转不动就给 None（不编一个 0 出来）。"""
+    try:
+        return int(value) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _paper_id_of(row: Any) -> int | None:
+    """从 `RetrievedChunkOut` 或合并后的 state 字典里取 paper_id。"""
+    pid = row.get("paper_id") if isinstance(row, dict) else getattr(row, "paper_id", None)
+    return _as_int(pid)
+
+
+async def build_timeline(session: Any, chunks: list[Any]) -> list[TimelineItem]:
+    """把本次命中的论文排成时间轴（年份升序，年份缺失的沉底）。一次查询搞定。"""
+    counts: dict[int, int] = {}
+    for row in chunks:
+        pid = _paper_id_of(row)
+        if pid is not None:
+            counts[pid] = counts.get(pid, 0) + 1
+    if not counts:
+        return []
+
+    rows = (await session.execute(select(Paper.id, Paper.title, Paper.arxiv_id).where(Paper.id.in_(counts)))).all()
+    items = [
+        TimelineItem(
+            paper_id=int(pid),
+            title=str(title or ""),
+            arxiv_id=arxiv_id,
+            year=year_from_arxiv(arxiv_id),
+            chunks=counts[pid],
+        )
+        for pid, title, arxiv_id in rows
+    ]
+    items.sort(key=lambda it: (it.year is None, it.year or 0))
+    return items
+
+
+async def timeline_done_extra(merged: dict[str, Any]) -> dict[str, Any]:
+    """收尾帧要带的附加数据：跨篇对比才有时间轴。
+
+    `/chat/stream` 与 `/qa/stream` 共用这一份 —— 两条流都靠它把时间轴送到前端，
+    各写一遍迟早只改到一条。自己开 session（流式生成器里没有请求级 session），
+    并且**失败不算数**：时间轴是锦上添花，算不出不该拖垮整条回答。
+    """
+    if merged.get("intent") != "cross_paper_reasoning":
+        return {"timeline": []}
+    try:
+        async with session_scope() as session:
+            items = await build_timeline(session, merged.get("retrieved") or [])
+        return {"timeline": [it.model_dump() for it in items]}
+    except Exception:  # noqa: BLE001 - 见 docstring
+        logger.exception("时间轴组装失败")
+        return {"timeline": []}
 
 
 def locate_answer_spans(answer: str, markers: set[int]) -> dict[int, tuple[int, int]]:
@@ -259,6 +347,9 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
     # 溯源列表：答案 + 溯源数组一起返回，前端拿到就能做句子高亮与 PDF 跳转
     sources = build_source_traces(raw_citations, answer)
     reflection = state.get("reflection") or {}
+    faithfulness = (reflection.get("scores") or {}).get("faithfulness") if reflection else None
+    # 时间轴只在跨篇对比时排：单篇问答排出来只有一个点，白搭一次查询
+    timeline = await build_timeline(session, retrieved) if state.get("intent") == "cross_paper_reasoning" else []
     usage = get_llm().usage
     latency = int((time.perf_counter() - started) * 1000)
     logger.info("问答完成 intent={} grounding={:.2f} latency={}ms", state.get("intent"), grounding, latency)
@@ -272,7 +363,7 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
         paper_ids=[int(p) for p in (payload.paper_ids or state.get("target_papers") or [])],
         citations=raw_citations,
         grounding_ratio=grounding,
-        faithfulness=(reflection.get("scores") or {}).get("faithfulness") if reflection else None,
+        faithfulness=faithfulness,
     )
 
     return ApiResponse.ok(
@@ -283,11 +374,13 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             citations=citations,
             sources=sources,
             grounding_ratio=grounding,
+            faithfulness=faithfulness,
             passed_grounding=state.get("guardrail_passed", grounding >= 0.8),
             unsupported_claims=state.get("unsupported_claims") or [],
             guardrail_flags=list(state.get("guardrail_flags") or []),
             plan=list(state.get("plan") or []),
             reflections=[reflection] if reflection else [],
+            timeline=timeline,
             retrieved=retrieved,
             debug=RetrievalDebug(
                 crag_level=state.get("crag_level"),
@@ -304,6 +397,176 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
             history_id=history_id,
         )
     )
+
+
+# ------------------------------------------------------------------ 流式（规格事件）
+def _qa_events(node: str, update: dict[str, Any]) -> list[tuple[Event, Any]]:
+    """把节点增量翻成 `/qa/stream` 的对外事件。
+
+    与 `/chat/stream` 的 `chat._node_events` 是**并列**的两套映射，不是替换：
+    那边细到 intent/plan/tool/reflection 每一种，这边按"前端要分几种样式渲染"
+    归并成 thinking / retrieval / citation / source。改一套别动另一套。
+    """
+    if node == "intent":
+        return [
+            (
+                Event.THINKING,
+                {
+                    "stage": "intent",
+                    "intent": update.get("intent"),
+                    "confidence": update.get("confidence", 0.0),
+                    "target_papers": update.get("target_papers", []),
+                },
+            )
+        ]
+    if node == "clarify":
+        return [(Event.THINKING, {"stage": "clarify", "question": update.get("clarify_question", "")})]
+    if node == "planner":
+        return [
+            (
+                Event.THINKING,
+                {"stage": "plan", "steps": update.get("plan", []), "round": update.get("plan_round", 0)},
+            )
+        ]
+    if node == "retriever":
+        return [
+            (
+                Event.RETRIEVAL,
+                {
+                    "name": "retrieve_papers",
+                    "status": "done",
+                    "n": len(update.get("retrieved") or []),
+                    "crag_level": update.get("crag_level"),
+                },
+            )
+        ]
+    if node == "tool":
+        trace = update.get("trace") or []
+        name = next((str(t.get("tool", "")) for t in trace if t.get("node") == "tool"), "")
+        status = next((str(t.get("status", "")) for t in trace if t.get("node") == "tool"), "done")
+        return [(Event.RETRIEVAL, {"name": name, "status": status})]
+    if node == "replanner":
+        return [(Event.THINKING, {"stage": "replan", "decision": update.get("replan_decision", "")})]
+    if node == "reflector":
+        refl = update.get("reflection") or {}
+        return [
+            (
+                Event.THINKING,
+                {
+                    "stage": "reflection",
+                    "round": refl.get("round", 0),
+                    "scores": refl.get("scores", {}),
+                    "overall": refl.get("overall", 0.0),
+                    "verdict": refl.get("verdict", ""),
+                },
+            )
+        ]
+    if node == "synthesizer":
+        out: list[tuple[Event, Any]] = []
+        for cite in update.get("citations", []) or []:
+            out.append((Event.CITATION, cite))
+            # source 帧只带"去哪儿看"的三元组（外加 bbox），前端拿它渲染 [paper_id:page:chunk_id] 徽章。
+            # 三个 id 一律转成 int：state 里的 Citation 存的是字符串（要过 checkpointer 的
+            # pickle 往返），而对外契约 SourceTraceOut 是 int —— 不统一，前端按 int 处理
+            # 就会拿到 "7" 这种字符串，两类溯源长得不一样。
+            out.append(
+                (
+                    Event.SOURCE,
+                    {
+                        "paper_id": _as_int(cite.get("paper_id")),
+                        "page": _as_int(cite.get("page_start") or cite.get("page")),
+                        "chunk_id": _as_int(cite.get("chunk_id")),
+                        "bbox": cite.get("bbox"),
+                        "title": cite.get("title", ""),
+                        "quote": str(cite.get("quote", ""))[:280],
+                        "confidence": float(cite.get("confidence") or cite.get("nli_score") or 0.0),
+                    },
+                )
+            )
+        return out
+    if node == "guardrails":
+        trace = update.get("trace") or []
+        action = next((str(t.get("action", "")) for t in trace if t.get("node") == "guardrails"), "")
+        if action == "block":
+            # 硬拒绝用 error 帧收场（而不是 guardrail 帧 + done）：前端只认"流以 done 或 error 结束"
+            return [(Event.ERROR, {"code": GuardrailBlockedError.code, "message": str(update.get("answer") or "")})]
+        return [(Event.GUARDRAIL, {"action": action, "flags": update.get("guardrail_flags", [])})]
+    return []
+
+
+@router.post("/stream", summary="流式问答（SSE）", operation_id="ask_question_stream")
+async def stream(payload: AskRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_frames(payload),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 让 nginx 不缓冲
+        },
+    )
+
+
+async def _stream_frames(payload: AskRequest) -> AsyncIterator[str]:
+    """跑同一张 Agent 图，事件按 /qa 的规格名发（见 `_qa_events`）。
+
+    落库复用 `chat` 的 `_open_turn` / `_close_turn`：会话与留痕的写法只此一份，
+    在 qa 里再抄一遍只会让两边慢慢漂开（会话模型 = `agent_runs.session_id` 那套约定
+    见 chat.py 模块头）。
+    """
+    from app.agents.graph import get_graph
+    from app.api.v1 import chat
+
+    started = time.perf_counter()
+    merged: dict[str, Any] = {}
+    session_id = f"qa-{uuid4().hex[:16]}"
+    turn = chat.ChatRequest(query=payload.query, paper_ids=payload.paper_ids, intent=payload.intent)
+
+    yield sse_comment("open")
+    try:
+        run_id = await chat._open_turn(session_id, turn)
+        initial: dict[str, Any] = {
+            "query": payload.query,
+            "session_id": session_id,
+            "target_papers": payload.paper_ids,
+        }
+        if payload.top_k:
+            initial["top_k"] = payload.top_k
+        if payload.intent:
+            initial["intent"] = payload.intent
+
+        async for mode, chunk in get_graph().astream(
+            initial, config={"configurable": {"thread_id": session_id}}, stream_mode=["updates", "custom"]
+        ):
+            if mode == "custom":
+                if isinstance(chunk, dict) and chunk.get("type") == "token":
+                    yield sse(Event.TOKEN, {"text": chunk.get("text", "")})
+                continue
+            for node, update in (chunk or {}).items():
+                if not isinstance(update, dict):
+                    continue
+                merged.update(update)
+                for event, data in _qa_events(str(node), update):
+                    yield sse(event, data)
+
+        latency = int((time.perf_counter() - started) * 1000)
+        await chat._close_turn(session_id, run_id, turn, merged, latency)
+
+        # 已经发过 error 帧的（防护硬拒绝）不再补 done —— 一条流只能有一种收尾
+        if merged.get("guardrail_action") == "block":
+            return
+
+        usage = get_llm().usage
+        yield done_event(
+            grounding_ratio=merged.get("grounding_ratio"),
+            citations=merged.get("citations") or [],
+            usage={"total_tokens": usage.total_tokens, "calls": usage.calls},
+            latency_ms=latency,
+            extra=await timeline_done_extra(merged),
+        )
+    except Exception as exc:  # noqa: BLE001 - 任何异常都要以 error 帧收尾，前端才不会卡
+        logger.exception("流式问答失败 session={}", session_id)
+        yield error_event(5000, f"{type(exc).__name__}: {exc}")
 
 
 @router.post(
@@ -395,4 +658,12 @@ async def history(
     return ApiResponse.ok([QAHistoryOut.model_validate(r) for r in rows])
 
 
-__all__ = ["build_source_traces", "build_sources", "locate_answer_spans", "persist_qa_history", "router"]
+__all__ = [
+    "build_source_traces",
+    "build_sources",
+    "build_timeline",
+    "locate_answer_spans",
+    "persist_qa_history",
+    "router",
+    "year_from_arxiv",
+]

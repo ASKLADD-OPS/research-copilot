@@ -1,4 +1,5 @@
 import type { PaperStatus } from '~/types/api'
+import type { NormRect } from '~/types/workbench'
 
 /**
  * 共享的类名常量。
@@ -93,4 +94,27 @@ export function groundingTone(ratio: number): PillTone {
   if (ratio >= 0.8) return 'ok'
   if (ratio >= 0.6) return 'warn'
   return 'bad'
+}
+
+/**
+ * 后端 bbox → 归一化矩形。
+ *
+ * `Chunk.bbox` 有两种形态（见 backend/app/models/chunk.py）：单区域 `[x0,y0,x1,y1]`、
+ * 多区域 `{page, boxes: [[x0,y0,x1,y1], ...]}`。两者都是**归一化**坐标，
+ * 所以这里只做「角点 → 宽高」的换算，不做任何缩放。
+ *
+ * 放在 utils 而不是组件里：阅读器（按坐标画框）与溯源列表（把 bbox 喂给跳转指令）
+ * 都要用它，留在组件里就得复制一份。
+ */
+export function rectsFromBbox(bbox: unknown): NormRect[] {
+  const corners = (b: unknown): NormRect | null => {
+    if (!Array.isArray(b) || b.length < 4) return null
+    const [x0, y0, x1, y1] = b.slice(0, 4).map(Number)
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return null
+    return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) }
+  }
+  const direct = corners(bbox)
+  if (direct) return [direct]
+  const boxes = (bbox as { boxes?: unknown[] } | null | undefined)?.boxes
+  return Array.isArray(boxes) ? boxes.map(corners).filter((r): r is NormRect => r !== null) : []
 }

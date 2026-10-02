@@ -100,11 +100,50 @@ export interface Citation {
   paper_id: string
   title: string
   section?: string | null
+  /** 后端 `CitationOut.page`。 */
+  page?: number | null
+  /**
+   * `page` 的别名。后端历史字段叫 `page`，前端按规格读 `page_start` ——
+   * 取值一律用 `pageStart(c)`，两边都认才不会出"页码显示为空"。
+   */
   page_start?: number | null
   page_end?: number | null
+  /** 归一化定位框：`[x0,y0,x1,y1]` 或 `{page, boxes:[[...]]}`（见 Chunk.bbox）。 */
+  bbox?: unknown
   quote: string
+  /** 答案里被这条引用支撑的那句话。 */
+  answer_span?: string
   nli_score: number
+  confidence?: number
   verified: boolean
+  attribution_method?: 'self_citation' | 'nli' | 'hybrid'
+}
+
+/** 引用在哪一页。`page` 与 `page_start` 谁有值用谁。 */
+export function pageStart(c: Citation): number | null {
+  // 0 按"没有"处理：页码是 1-based，而后端流式帧里 `page_start or 0` 会把缺省值写成 0。
+  // 不挡掉它，点引用就会跳到第 0 页（等于不跳）。
+  return c.page || c.page_start || null
+}
+
+/** 后端 `SourceTraceOut` —— 「答案片段 ← 哪块证据」的对应关系。 */
+export interface SourceTrace {
+  answer_span: string
+  chunk_id: number | null
+  paper_id: number | null
+  page: number | null
+  bbox: unknown
+  confidence: number
+  attribution_method: 'self_citation' | 'nli' | 'hybrid'
+}
+
+/** 跨篇对比的时间轴节点（后端 `TimelineItem`）。 */
+export interface TimelineItem {
+  paper_id: number | null
+  title: string
+  year: number | null
+  arxiv_id: string | null
+  chunks: number
 }
 
 export interface RetrievedChunk {
@@ -134,16 +173,23 @@ export interface AskResult {
   intent: string
   intent_confidence: number
   citations: Citation[]
+  /** 「答案片段 ← 证据」的对应关系，规格契约里的 `sources[]`。 */
+  sources: SourceTrace[]
   grounding_ratio: number
+  /** Reflector 的忠实度评分；无评审时为 null。 */
+  faithfulness?: number | null
   passed_grounding: boolean
   unsupported_claims: string[]
   guardrail_flags: string[]
   plan: PlanStep[]
   reflections: Reflection[]
+  /** 跨篇对比的方法演进时间轴（按年份升序）。 */
+  timeline: TimelineItem[]
   retrieved: RetrievedChunk[]
   debug?: RetrievalDebug | null
   usage: Record<string, number>
   latency_ms: number
+  history_id?: number | null
 }
 
 export interface TraceResult {
@@ -291,6 +337,8 @@ export interface ChatMessage {
   intent?: string | null
   citations: Citation[]
   grounding_ratio?: number | null
+  /** Reflector 的忠实度评分；这一轮没跑评审时为 null。 */
+  faithfulness?: number | null
   created_at?: string | null
 }
 
@@ -299,7 +347,9 @@ export interface ConversationDetail extends Conversation {
 }
 
 // ---------------------------------------------------------------- SSE 事件
-// 与 backend/app/llm/streaming.py 的 Event 枚举严格对应
+// 与 backend/app/llm/streaming.py 的 Event 枚举严格对应。
+// /chat/stream 用细粒度那一套（intent/plan/tool/reflection/...）；
+// /qa/stream 用归并后的 thinking/retrieval/citation/source/token/done。
 export type StreamEventName =
   | 'intent'
   | 'clarify'
@@ -307,11 +357,38 @@ export type StreamEventName =
   | 'tool'
   | 'token'
   | 'citation'
+  | 'source'
+  | 'thinking'
+  | 'retrieval'
   | 'reflection'
   | 'replan'
   | 'guardrail'
   | 'error'
   | 'done'
+
+/** `/qa/stream` 的 thinking 帧（stage 决定前端归到哪一类轨迹）。 */
+export interface ThinkingEvent {
+  stage: 'intent' | 'clarify' | 'plan' | 'replan' | 'reflection' | string
+  intent?: string
+  confidence?: number
+  question?: string
+  steps?: PlanStep[]
+  decision?: string
+  scores?: Record<string, number>
+  overall?: number
+  verdict?: string
+}
+
+/** `/qa/stream` 的 source 帧 —— 渲染 [paper_id:page:chunk_id] 徽章与 PDF 跳转所需的一切。 */
+export interface SourceEvent {
+  paper_id: number | null
+  page: number | null
+  chunk_id: number | null
+  bbox: unknown
+  title: string
+  quote: string
+  confidence: number
+}
 
 export interface StreamEvent<T = unknown> {
   event: StreamEventName

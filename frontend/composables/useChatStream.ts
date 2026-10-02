@@ -63,10 +63,17 @@ export function useChatStream() {
     return { event: name as StreamEventName, data }
   }
 
-  async function start(body: unknown, handlers: StreamHandlers): Promise<void> {
+  /**
+   * 开一条流。
+   *
+   * `path` 默认 `/chat/stream`（对话面板用的细粒度事件协议）。规格里的
+   * `/qa/stream` 用同一套 SSE 收发，只是事件名归并成 thinking/retrieval/source，
+   * 所以换个路径即可复用，不需要第二个消费器。
+   */
+  async function start(body: unknown, handlers: StreamHandlers, path = '/chat/stream'): Promise<void> {
     abort()
     controller = new AbortController()
-    const url = sseBase.replace(/\/$/, '') + '/chat/stream'
+    const url = sseBase.replace(/\/$/, '') + path
 
     try {
       const res = await fetch(url, {
