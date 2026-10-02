@@ -46,7 +46,7 @@ def _to_schema(graph: nx.DiGraph, *, max_nodes: int = MAX_NODES) -> GraphOut:
     return GraphOut(nodes=nodes, edges=edges, n_nodes=len(nodes), n_edges=len(edges), truncated=truncated)
 
 
-@router.get("", response_model=ApiResponse[GraphOut], summary="获取引文图")
+@router.get("", response_model=ApiResponse[GraphOut], summary="获取引文图", operation_id="get_citation_graph")
 async def get_graph(
     paper_ids: Annotated[list[int] | None, Query(description="限定子图范围")] = None,
 ) -> ApiResponse[GraphOut]:
@@ -56,7 +56,9 @@ async def get_graph(
     return ApiResponse.ok(_to_schema(graph))
 
 
-@router.post("/analyze", response_model=ApiResponse[GraphAnalysisResult], summary="图谱分析")
+@router.post(
+    "/analyze", response_model=ApiResponse[GraphAnalysisResult], summary="图谱分析", operation_id="analyze_graph"
+)
 async def analyze(payload: GraphAnalysisRequest, session: SessionDep) -> ApiResponse[GraphAnalysisResult]:
     from app.graph_analysis import CitationGraphAnalyzer
 
@@ -152,7 +154,7 @@ async def get_snapshot(snapshot_id: int, session: SessionDep) -> ApiResponse[dic
     )
 
 
-@router.post("/rebuild", response_model=ApiResponse[dict[str, Any]], summary="重建引文边")
+@router.post("/rebuild", response_model=ApiResponse[dict[str, Any]], summary="重建引文边", operation_id="rebuild_graph")
 async def rebuild(
     paper_ids: Annotated[list[int] | None, Query(description="限定范围")] = None,
 ) -> ApiResponse[dict[str, Any]]:

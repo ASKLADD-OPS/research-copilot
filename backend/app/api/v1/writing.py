@@ -75,7 +75,7 @@ async def templates() -> ApiResponse[list[WritingTemplateOut]]:
     return ApiResponse.ok(TEMPLATES)
 
 
-@router.post("/draft", response_model=ApiResponse[WriteResult], summary="生成章节草稿")
+@router.post("/draft", response_model=ApiResponse[WriteResult], summary="生成章节草稿", operation_id="write_draft")
 async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[WriteResult]:
     from app.agents.mcp.local_tools import write_section
     from app.rag.retriever import HybridRetriever, to_context_block
@@ -124,7 +124,9 @@ async def draft(payload: WriteRequest, session: SessionDep) -> ApiResponse[Write
     )
 
 
-@router.post("/translate", response_model=ApiResponse[TranslateResult], summary="学术翻译")
+@router.post(
+    "/translate", response_model=ApiResponse[TranslateResult], summary="学术翻译", operation_id="write_translation"
+)
 async def translate(payload: TranslateRequest) -> ApiResponse[TranslateResult]:
     from app.agents.mcp.local_tools import translate_text
     from app.llm.client import get_llm

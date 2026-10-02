@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     MCP_SEMANTIC_SCHOLAR_ENABLED: bool = True
     MCP_PYTHON_EXEC_ENABLED: bool = True
     MCP_WEB_SEARCH_ENABLED: bool = True
+    # 单次工具调用的墙钟上限与失败重试次数（指数退避，基 0.5s → 0.5 / 1.0 ...）。
+    # 只作用于**调用侧**；MCP_TIMEOUT 是 Server 内部单次 HTTP 请求的上限。
+    MCP_TOOL_TIMEOUT: int = 30
+    MCP_TOOL_RETRIES: int = 2
     PYTHON_EXEC_TIMEOUT: int = 10
     PYTHON_EXEC_MAX_MEM_MB: int = 512
     SEMANTIC_SCHOLAR_API_KEY: str = ""

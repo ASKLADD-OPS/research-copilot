@@ -75,8 +75,43 @@ async def call_tool(name: str, args: dict[str, Any]) -> Any:
 
 
 def tool_names() -> list[str]:
-    """全部已注册工具名（用于 planner prompt 与健康检查）。"""
+    """**本地**工具名（不含 MCP Server 的工具 —— 那批要 await 装载）。"""
     return sorted(set(_LOCAL))
 
 
-__all__ = ["call_tool", "tool_names"]
+# ---------------------------------------------------------------- 意图 → 工具
+# 8 类 intent 各自该看到哪些工具。工具全量塞进 prompt 会稀释模型的注意力，
+# 而且"该用 arxiv_search 的场合给了 translate_text"是选错工具的常见原因。
+# key 必须与 intent 节点的输出一致（app/agents/nodes/intent.py）。
+_INTENT_TOOLS: dict[str, tuple[str, ...]] = {
+    "single_paper_qa": ("retrieve_papers",),
+    "cross_paper_reasoning": ("retrieve_papers", "graph_analyze"),
+    "literature_search": ("arxiv_search", "pubmed_search", "semantic_scholar_search", "web_search"),
+    "graph_analysis": ("graph_analyze", "retrieve_papers"),
+    "writing_assist": ("write_section", "retrieve_papers"),
+    "visualization": ("make_chart", "python_exec"),
+    "translation": ("translate_text",),
+    "chitchat": (),  # 闲聊不该调任何工具，给空集才是对的
+}
+
+
+async def get_tools_for_intent(intent: str | None) -> list[str]:
+    """该意图下应暴露给 LLM 的工具名（升序）。
+
+    只返回**当前确实可用**的名字：白名单里配了但 Server 被关掉（缺 API key）
+    的工具会被 intersection 掉，避免 prompt 里出现一个调不通的工具。
+    未登记的意图（含 None / 空串）返回全量 —— 宁可多给，也别让一个新意图
+    拿到空工具集导致整步无工具可用。
+    """
+    toolbox = get_toolbox()
+    if not toolbox._loaded:  # noqa: SLF001 - 与 call_tool 同一套惰性装载
+        await toolbox.load()
+
+    available = set(_LOCAL) | set(toolbox._tools)  # noqa: SLF001
+    allowed = _INTENT_TOOLS.get((intent or "").strip())
+    if allowed is None:
+        return sorted(available)
+    return sorted(available & set(allowed))
+
+
+__all__ = ["call_tool", "get_tools_for_intent", "tool_names"]

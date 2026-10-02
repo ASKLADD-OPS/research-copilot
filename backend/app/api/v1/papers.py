@@ -75,7 +75,9 @@ async def _get_paper(session: AsyncSession, paper_id: int) -> Paper:
     return paper
 
 
-@router.post("/upload", response_model=ApiResponse[PaperUploadResult], summary="上传 PDF 并入库")
+@router.post(
+    "/upload", response_model=ApiResponse[PaperUploadResult], summary="上传 PDF 并入库", operation_id="upload_paper"
+)
 async def upload_paper(
     session: SessionDep,
     file: Annotated[UploadFile, File(description="PDF 文件")],
@@ -149,7 +151,7 @@ async def create_paper(payload: PaperCreate, session: SessionDep) -> ApiResponse
     return ApiResponse.ok(PaperOut.model_validate(paper))
 
 
-@router.get("", response_model=ApiResponse[Page[PaperOut]], summary="论文列表")
+@router.get("", response_model=ApiResponse[Page[PaperOut]], summary="论文列表", operation_id="list_papers")
 async def list_papers(
     session: SessionDep,
     page: PageDep,
@@ -182,7 +184,7 @@ async def list_papers(
     )
 
 
-@router.get("/{paper_id}", response_model=ApiResponse[PaperDetail], summary="论文详情")
+@router.get("/{paper_id}", response_model=ApiResponse[PaperDetail], summary="论文详情", operation_id="get_paper")
 async def get_paper(paper_id: int, session: SessionDep) -> ApiResponse[PaperDetail]:
     paper = await _get_paper(session, paper_id)
     n_chunks = int(
@@ -205,7 +207,12 @@ async def update_paper(paper_id: int, payload: PaperUpdate, session: SessionDep)
     return ApiResponse.ok(PaperOut.model_validate(paper))
 
 
-@router.post("/{paper_id}/reindex", response_model=ApiResponse[PaperUploadResult], summary="重新解析入库")
+@router.post(
+    "/{paper_id}/reindex",
+    response_model=ApiResponse[PaperUploadResult],
+    summary="重新解析入库",
+    operation_id="reindex_paper",
+)
 async def reindex_paper(paper_id: int, session: SessionDep) -> ApiResponse[PaperUploadResult]:
     paper = await _get_paper(session, paper_id)
     if not paper.file_path or not await asyncio.to_thread(Path(paper.file_path).exists):
@@ -222,7 +229,12 @@ async def reindex_paper(paper_id: int, session: SessionDep) -> ApiResponse[Paper
     return ApiResponse.ok(PaperUploadResult(paper=PaperOut.model_validate(paper), index_started=True))
 
 
-@router.get("/{paper_id}/chunks", response_model=ApiResponse[list[ChunkOut]], summary="分块内容")
+@router.get(
+    "/{paper_id}/chunks",
+    response_model=ApiResponse[list[ChunkOut]],
+    summary="分块内容",
+    operation_id="get_paper_chunks",
+)
 async def list_chunks(
     paper_id: int,
     session: SessionDep,
@@ -271,7 +283,9 @@ async def get_pdf(paper_id: int, session: SessionDep) -> FileResponse:
     return FileResponse(path, media_type="application/pdf", filename=f"{(paper.title or str(paper_id))[:80]}.pdf")
 
 
-@router.delete("/{paper_id}", response_model=ApiResponse[dict[str, Any]], summary="删除论文")
+@router.delete(
+    "/{paper_id}", response_model=ApiResponse[dict[str, Any]], summary="删除论文", operation_id="delete_paper"
+)
 async def delete_paper(paper_id: int, session: SessionDep) -> ApiResponse[dict[str, Any]]:
     paper = await _get_paper(session, paper_id)
     file_path = paper.file_path

@@ -14,11 +14,16 @@ _WS_RE = re.compile(r"\s+")
 
 
 def clean_text(raw: str, *, limit: int = 2000) -> str:
-    """去 HTML 标签 / 实体 / 多余空白，截断到 limit。"""
+    """去 HTML 标签 / 实体 / 多余空白，截断到 limit。
+
+    **顺序不能反**：先 unescape 再剥标签。arXiv 摘要里的尖括号是转义过的
+    （`&lt;b&gt;`），先剥标签它们毫发无伤，unescape 之后才变成真的 `<b>` ——
+    结果就是标签被原样喂给了模型。
+    """
     if not raw:
         return ""
-    text = _TAG_RE.sub(" ", raw)
-    text = html.unescape(text)
+    text = html.unescape(raw)
+    text = _TAG_RE.sub(" ", text)
     text = _WS_RE.sub(" ", text).strip()
     return text[:limit]
 

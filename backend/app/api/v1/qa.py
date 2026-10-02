@@ -201,7 +201,9 @@ async def persist_qa_history(
 
 
 # ------------------------------------------------------------------ 路由
-@router.post("/ask", response_model=ApiResponse[AskResult], summary="提问（完整 Agent 链路）")
+@router.post(
+    "/ask", response_model=ApiResponse[AskResult], summary="提问（完整 Agent 链路）", operation_id="ask_question"
+)
 async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult]:
     from app.agents.graph import get_graph
 
@@ -295,7 +297,12 @@ async def ask(payload: AskRequest, session: SessionDep) -> ApiResponse[AskResult
     )
 
 
-@router.post("/retrieve", response_model=ApiResponse[list[RetrievedChunkOut]], summary="只检索（调参用）")
+@router.post(
+    "/retrieve",
+    response_model=ApiResponse[list[RetrievedChunkOut]],
+    summary="只检索（调参用）",
+    operation_id="retrieve_chunks",
+)
 async def retrieve(payload: AskRequest, session: SessionDep) -> ApiResponse[list[RetrievedChunkOut]]:
     from app.rag.retriever import HybridRetriever
 
@@ -308,7 +315,9 @@ async def retrieve(payload: AskRequest, session: SessionDep) -> ApiResponse[list
     return ApiResponse.ok(rows)
 
 
-@router.post("/trace", response_model=ApiResponse[TraceResult], summary="溯源校验（不生成）")
+@router.post(
+    "/trace", response_model=ApiResponse[TraceResult], summary="溯源校验（不生成）", operation_id="trace_answer"
+)
 async def trace(payload: TraceRequest, session: SessionDep) -> ApiResponse[TraceResult]:
     from app.rag.source_tracing import get_tracer
 
@@ -363,7 +372,12 @@ async def trace(payload: TraceRequest, session: SessionDep) -> ApiResponse[Trace
     )
 
 
-@router.get("/history", response_model=ApiResponse[list[QAHistoryOut]], summary="问答历史（含溯源）")
+@router.get(
+    "/history",
+    response_model=ApiResponse[list[QAHistoryOut]],
+    summary="问答历史（含溯源）",
+    operation_id="get_qa_history",
+)
 async def history(
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=200, description="返回条数")] = 20,

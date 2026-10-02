@@ -116,7 +116,12 @@ async def _guard(name: str, coro: Any, timeout: float = PROBE_TIMEOUT) -> StoreH
 
 
 # ------------------------------------------------------------------ 路由
-@router.get("/db", response_model=ApiResponse[DbHealthReport], summary="三库健康检查（Postgres / Milvus / Redis）")
+@router.get(
+    "/db",
+    response_model=ApiResponse[DbHealthReport],
+    summary="三库健康检查（Postgres / Milvus / Redis）",
+    operation_id="check_databases",
+)
 async def health_db() -> ApiResponse[DbHealthReport] | JSONResponse:
     components = list(
         await asyncio.gather(

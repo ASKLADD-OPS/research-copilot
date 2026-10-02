@@ -30,6 +30,13 @@ _SERVER_FLAG: dict[str, str] = {
     "web-search": "MCP_WEB_SEARCH_ENABLED",
 }
 
+_BACKOFF_BASE = 0.5  # 指数退避基数（秒）；测试里调到 0 免得白等
+
+
+def backoff_delay(attempt: int) -> float:
+    """第 `attempt`（从 0 起）次重试前该等多久：0.5s → 1s → 2s ..."""
+    return _BACKOFF_BASE * (2**attempt)
+
 
 def enabled_servers() -> list[str]:
     """按配置开关过滤出启用的 Server 名。"""
@@ -114,11 +121,31 @@ class MCPToolbox:
         return self._tools.get(name)
 
     async def ainvoke(self, name: str, args: dict[str, Any]) -> Any:
+        """调用工具：单次墙钟超时 + 指数退避重试。
+
+        重试只针对**抛异常**的调用（网络抖动 / 5xx / 超时）。工具自己"成功返回
+        一条错误说明"（如 python_exec 拒绝危险代码）不算失败，不会重试 —— 重试
+        一个确定性拒绝只是白等。
+        """
         tool = self._tools.get(name)
         if tool is None:
             raise KeyError(f"未知工具 {name}（已装载：{sorted(self._tools)}）")
-        result = tool.ainvoke(args)
-        return await result if inspect.isawaitable(result) else result
+
+        attempts = max(1, int(settings.MCP_TOOL_RETRIES) + 1)
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                async with asyncio.timeout(settings.MCP_TOOL_TIMEOUT):
+                    result = tool.ainvoke(args)
+                    return await result if inspect.isawaitable(result) else result
+            except Exception as exc:  # noqa: BLE001 - 交给末尾统一抛出
+                last = exc
+                if attempt + 1 >= attempts:
+                    break
+                delay = backoff_delay(attempt)
+                logger.warning("工具 {} 第 {} 次调用失败（{}），{:.1f}s 后重试", name, attempt + 1, exc, delay)
+                await asyncio.sleep(delay)
+        raise last if last is not None else RuntimeError(f"工具 {name} 调用失败")
 
     def langchain_tools(self) -> list[Any]:
         return list(self._tools.values())
@@ -147,4 +174,16 @@ def get_toolbox() -> MCPToolbox:
     return _toolbox
 
 
-__all__ = ["MCPToolbox", "enabled_servers", "get_toolbox"]
+async def load_all_mcp_tools() -> list[Any]:
+    """装载全部 MCP Server 的工具，返回 LangChain `BaseTool` 列表。
+
+    这就是"工具总入口"：拿到的列表可以直接喂给
+    `create_react_agent(model, tools)` 或自定义图的 tool 节点。
+    幂等 —— 首次装载后走缓存，不会每个请求重新起一遍 Server。
+    """
+    toolbox = get_toolbox()
+    await toolbox.load()
+    return toolbox.langchain_tools()
+
+
+__all__ = ["MCPToolbox", "backoff_delay", "enabled_servers", "get_toolbox", "load_all_mcp_tools"]

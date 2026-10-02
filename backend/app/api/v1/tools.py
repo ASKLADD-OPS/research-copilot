@@ -14,7 +14,7 @@ from app.schemas import ApiResponse, ToolCallRequest, ToolCallResult, ToolInfo, 
 router = APIRouter(prefix="/tools", tags=["工具"])
 
 
-@router.get("", response_model=ApiResponse[ToolListOut], summary="可用工具清单")
+@router.get("", response_model=ApiResponse[ToolListOut], summary="可用工具清单", operation_id="list_available_tools")
 async def list_tools() -> ApiResponse[ToolListOut]:
     from app.agents.mcp.client import enabled_servers, get_toolbox
     from app.agents.mcp.registry import _LOCAL  # noqa: PLC2701 - 只读列举本地工具名
@@ -49,7 +49,7 @@ def _schema_of(tool: Any) -> dict[str, Any]:
         return {}
 
 
-@router.post("/call", response_model=ApiResponse[ToolCallResult], summary="直接调用工具")
+@router.post("/call", response_model=ApiResponse[ToolCallResult], summary="直接调用工具", operation_id="invoke_tool")
 async def call(payload: ToolCallRequest) -> ApiResponse[ToolCallResult]:
     from app.agents.mcp.registry import call_tool
 
