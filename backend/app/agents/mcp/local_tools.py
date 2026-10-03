@@ -162,7 +162,13 @@ async def write_section(
     return {"text": text, "section": section, "chars": len(text)}
 
 
-async def translate_text(text: str, target: str = "zh", keep_terms: bool = True) -> dict[str, Any]:
+async def translate_text(
+    text: str,
+    target: str = "zh",
+    keep_terms: bool = True,
+    glossary: dict[str, str] | None = None,
+    passive: bool = False,
+) -> dict[str, Any]:
     """翻译学术文本，保全公式、术语与引用编号。
 
     何时使用：用户要求翻译摘要、段落，或做双语对照。
@@ -172,18 +178,31 @@ async def translate_text(text: str, target: str = "zh", keep_terms: bool = True)
         text: 待翻译文本（可为 LaTeX 片段）。
         target: `zh` | `en`。
         keep_terms: 是否保留术语英文原文（首次出现时中英对照）。
+        glossary: 术语强制映射 `{原文: 译名}`。**命中即必须照译**，优先级高于模型自己的判断 ——
+            这是"术语一致"唯一可靠的实现方式，靠提示词祈祷模型记住是不够的。
+        passive: 偏好被动语态（学术写作惯例；中文相应改用「被／由／经」等表述）。
 
     Returns:
         {"text": str, "target": str}
     """
     lang_name = "中文" if target.startswith("zh") else "English"
-    prompt = (
-        f"把下面的学术文本翻译成{lang_name}。\n"
-        "规则：① **公式、变量名、引用编号（如 [1]）原样保留**；"
-        + ("② 专业术语首次出现时写成「中文（English）」；" if keep_terms else "")
-        + "③ 不要增删内容，不要加解释；④ 只输出译文。\n\n原文：\n"
-        + text
-    )
+    rules = [
+        "① **公式、变量名、引用编号（如 [1]）原样保留**",
+        ("② 专业术语首次出现时写成「中文（English）」；" if keep_terms else ""),
+        "③ 不要增删内容，不要加解释",
+        "④ 只输出译文",
+    ]
+    prompt = f"把下面的学术文本翻译成{lang_name}。\n规则：{'；'.join(r for r in rules if r)}。\n"
+    if passive:
+        prompt += (
+            "⑤ 用被动语态与无人称表述（英文用被动式，中文用「被／由／经／据」等），"
+            "避免「我们」「本文作者」这类第一人称主语。\n"
+        )
+    if glossary:
+        terms = "\n".join(f"- {src} → {dst}" for src, dst in list(glossary.items())[:200])
+        prompt += f"⑥ 以下是用户指定的术语表，**出现就必须按它译，不得自行改译**：\n{terms}\n"
+    prompt += f"\n原文：\n{text}"
+
     out = await get_llm().complete(Role.UTILITY, [{"role": "user", "content": prompt}], temperature=0.2)
     return {"text": out, "target": target}
 

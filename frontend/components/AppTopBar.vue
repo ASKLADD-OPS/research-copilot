@@ -6,7 +6,7 @@
  * 检索范围（在对话输入框旁，一句话问哪儿就显示哪儿）。
  * 顶栏每多一个控件，下面三栏能用的高度就少一分 —— 这是个工作台，不是门户。
  */
-import { PhArrowsClockwise, PhFileText, PhGraph, PhHeartbeat, PhMagnifyingGlass, PhPencilLine, PhSparkle, PhArrowCounterClockwise } from '@phosphor-icons/vue'
+import { PhArrowsClockwise, PhChartLine, PhFileText, PhGraph, PhHeartbeat, PhMagnifyingGlass, PhPencilLine, PhSparkle, PhTranslate, PhArrowCounterClockwise } from '@phosphor-icons/vue'
 import type { MainView } from '~/types/workbench'
 
 const ui = useUiStore()
@@ -97,6 +97,26 @@ onBeforeUnmount(() => {
     >
       <PhPencilLine :size="12" />
       写作台
+    </NuxtLink>
+
+    <!-- 数据可视化与学术翻译。同样是独立页面：两条路都是"传一个文件、反复改参数、盯着结果看"，
+         跟工作台的"看着原文提问"不共享任何状态，塞进右栏只会两边都挤。 -->
+    <NuxtLink
+      to="/app/visualize"
+      class="inline-flex h-6.5 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+      title="拖 CSV 进来 → Agent 选图型 → 出 PNG + 学术图注"
+    >
+      <PhChartLine :size="12" />
+      数据可视化
+    </NuxtLink>
+
+    <NuxtLink
+      to="/app/translate"
+      class="inline-flex h-6.5 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-ink-3 transition-colors hover:bg-hover hover:text-ink"
+      title="逐段学术翻译：术语表约束 · 公式引用不变 · 左右分栏滚动同步"
+    >
+      <PhTranslate :size="12" />
+      学术翻译
     </NuxtLink>
 
     <span class="min-w-0 flex-1" />

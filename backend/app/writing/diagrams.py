@@ -89,9 +89,24 @@ class ChartSeries(BaseModel):
 
 
 class ChartSpec(BaseModel):
-    """matplotlib 的输入。刻意与 `app.agents.mcp.local_tools.make_chart` 同构。"""
+    """matplotlib 的输入。刻意与 `app.agents.mcp.local_tools.make_chart` 同构。
 
-    chart_type: Literal["bar", "line", "pie", "scatter"] = "bar"
+    七种图型共用同一套字段，各型的读法：
+
+    | chart_type | categories | series[i].data | series[i].name |
+    |---|---|---|---|
+    | bar / line | x 轴刻度 | 每个刻度的值（长度=len(categories)） | 图例名 |
+    | pie | 扇区名 | 第一组即扇区数值 | 忽略 |
+    | scatter | x 轴数值（可解析成数时用，否则退化成序号） | y 值 | 图例名 |
+    | heatmap | 列名（x 轴） | 该行的数值（长度=len(categories)） | 行名（y 轴） |
+    | boxplot | 分组名 | 该组的**原始样本**（可不等长） | 忽略（用 categories） |
+    | radar | 轴名 | 各轴数值（长度=len(categories)，≥3） | 图例名 |
+
+    boxplot 的原始样本上限仍是 64 —— 箱线图的四分位对抽样不敏感，64 个点画出来的箱子
+    与全量基本一致（`ponytail:` 真要精确分位数就绕过这里直接算好再传）。
+    """
+
+    chart_type: Literal["bar", "line", "pie", "scatter", "heatmap", "boxplot", "radar"] = "bar"
     title: str = Field(default="", max_length=200)
     xlabel: str = Field(default="", max_length=80)
     ylabel: str = Field(default="", max_length=80)
@@ -140,10 +155,13 @@ _SYSTEMS: dict[str, str] = {
     "matplotlib": """你是数据可视化专家。根据要画的东西给出**图表规格**（不是代码）。
 
 硬规则：
-1. `chart_type` 取 bar / line / pie / scatter 之一；趋势用 line，对比用 bar，占比用 pie。
+1. `chart_type` 取 bar / line / pie / scatter / heatmap / boxplot / radar 之一；
+   趋势用 line，对比用 bar，占比用 pie，相关性用 scatter，矩阵用 heatmap，
+   分布用 boxplot，多指标对比用 radar。
 2. **数据只能来自「要画的东西」里已经给出的数字**。一个数字都没有时，
    `series` 留空数组 —— 不要编造数值（编出来的图比没有图更糟）。
-3. `series[i].data` 的长度必须等于 `categories` 的长度（scatter 时两两成对）。
+3. `series[i].data` 的长度必须等于 `categories` 的长度（scatter 时两两成对，
+   boxplot 时是该组的原始样本、可不等长，radar 时 ≥3 个轴）。
 4. `caption` 写成 'Figure N: …'。
 只输出 JSON，不要解释。""",
 }
@@ -246,11 +264,20 @@ def _use_cjk_fonts() -> list[str]:
 
 
 def _chart_png(spec: ChartSpec) -> bytes:
-    """把规格画成 PNG。**代码是固定的**，模型只能决定数据与类型（见模块头第 1 条）。"""
+    """把规格画成 PNG。**代码是固定的**，模型只能决定数据与类型（见模块头第 1 条）。
+
+    七种图型在这里各自一小段。radar 要极坐标轴，所以 `subplots` 得先知道类型 ——
+    这是全文唯一一处"按类型建图"的地方。
+    """
     _use_cjk_fonts()
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.0), dpi=160)
+    # radar 必须是 polar axes；其余六种是普通直角坐标轴。
+    fig, ax = plt.subplots(
+        figsize=(5.8, 4.6) if spec.chart_type == "radar" else (6.4, 4.0),
+        dpi=160,
+        **({"subplot_kw": {"projection": "polar"}} if spec.chart_type == "radar" else {}),
+    )
     cats = spec.categories
     if spec.chart_type == "pie":
         values = list(spec.series[0].data) if spec.series else []
@@ -258,9 +285,56 @@ def _chart_png(spec: ChartSpec) -> bytes:
         if values:
             ax.pie(values, labels=labels, autopct="%1.1f%%", startangle=90)
             ax.axis("equal")
+    elif spec.chart_type == "heatmap":
+        matrix = [list(s.data) for s in spec.series if s.data]
+        if matrix:
+            width = max(len(row) for row in matrix)
+            matrix = [row + [float("nan")] * (width - len(row)) for row in matrix]
+            im = ax.imshow(matrix, aspect="auto", cmap="viridis")
+            if cats:
+                ax.set_xticks(range(min(len(cats), width)))
+                ax.set_xticklabels(cats[:width], rotation=30, ha="right", fontsize=8)
+            ax.set_yticks(range(len(spec.series)))
+            ax.set_yticklabels([s.name or f"#{i + 1}" for i, s in enumerate(spec.series)], fontsize=8)
+            fig.colorbar(im, ax=ax, shrink=0.85)
+    elif spec.chart_type == "boxplot":
+        groups = [list(s.data) for s in spec.series if s.data]
+        if groups:
+            # 用 set_xticklabels 而不是 boxplot(labels=…)：`labels=` 在 mpl 3.9 改名成
+            # `tick_labels`，两版之间会 warning —— 绕开这个参数就不用管版本。
+            ax.boxplot(groups, widths=0.6)
+            ax.set_xticks(range(1, len(groups) + 1))
+            ax.set_xticklabels(
+                (cats[: len(groups)] or [f"#{i + 1}" for i in range(len(groups))]), rotation=0, fontsize=8
+            )
+    elif spec.chart_type == "radar":
+        import math
+
+        n = len(cats)
+        if n >= 3:
+            angles = [2 * math.pi * k / n for k in range(n)]
+            ax.set_xticks(angles)
+            ax.set_xticklabels(cats, fontsize=8)
+            for s in spec.series:
+                values = list(s.data[:n])
+                if len(values) < n:
+                    continue
+                ax.plot(angles + angles[:1], values + values[:1], marker="o", ms=3, label=s.name or None)
+                ax.fill(angles + angles[:1], values + values[:1], alpha=0.15)
+            # 雷达图的径向上限取所有系列的最大值，免得曲线全挤在圆心
+            top = max((max(s.data) for s in spec.series if s.data), default=0.0)
+            if top > 0:
+                ax.set_ylim(0, top * 1.1)
     elif spec.chart_type == "scatter":
+        # x 能当数字读就用真实 x 值（真散点）；读不出（如类别名）才退回序号。
+        xs_all: list[float] | None = None
+        if cats:
+            try:
+                xs_all = [float(c) for c in cats]
+            except ValueError:
+                xs_all = None
         for s in spec.series:
-            xs = list(range(len(s.data))) if not cats else list(range(min(len(s.data), len(cats))))
+            xs = (xs_all or list(range(len(s.data))))[: len(s.data)]
             ax.scatter(xs, s.data[: len(xs)], label=s.name or None, s=28)
     else:
         n = len(spec.series)
@@ -280,8 +354,10 @@ def _chart_png(spec: ChartSpec) -> bytes:
         ax.set_xlabel(spec.xlabel, fontsize=9)
     if spec.ylabel:
         ax.set_ylabel(spec.ylabel, fontsize=9)
-    if len(spec.series) > 1:
-        ax.legend(fontsize=8)
+    # 分类轴的图（heatmap 行名、boxplot 组名）已经写在刻度标签上，
+    # 再来一个图例就是同一份信息说两遍 —— 而且 boxplot 没有带 label 的 artist，会 warning
+    if len(spec.series) > 1 and spec.chart_type not in ("heatmap", "boxplot"):
+        ax.legend(fontsize=8, loc="best")
     ax.grid(True, axis="y", alpha=0.25)
     fig.tight_layout()
 

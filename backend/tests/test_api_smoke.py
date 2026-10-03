@@ -45,6 +45,12 @@ EXPECTED_PATHS = {
     "/api/v1/writing/templates",
     "/api/v1/writing/draft",
     "/api/v1/writing/translate",
+    # CSV 可视化
+    "/api/v1/visualize/upload",
+    "/api/v1/visualize/generate",
+    # 学术翻译（逐段 + 术语表）
+    "/api/v1/translate",
+    "/api/v1/translate/glossary",
     # 工具
     "/api/v1/tools",
     "/api/v1/tools/call",

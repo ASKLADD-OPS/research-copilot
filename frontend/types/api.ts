@@ -705,3 +705,94 @@ export interface DiagramResult {
   warning: string
   elapsed_ms: number
 }
+
+// ---------------------------------------------------------------- CSV 可视化
+
+/** 规格里点名的六种图型。`auto` 只是前端的"让 Agent 自己选"，后端不收。 */
+export type ChartType = 'line' | 'bar' | 'scatter' | 'heatmap' | 'boxplot' | 'radar'
+export type ColumnDtype = 'numeric' | 'datetime' | 'text'
+
+export interface CsvColumnProfile {
+  name: string
+  dtype: ColumnDtype
+  missing: number
+  unique: number
+  min: number | null
+  max: number | null
+  mean: number | null
+  samples: string[]
+}
+
+/** 上传回执。`dataset_id` 是落盘文件句柄，回传给 /visualize/generate。 */
+export interface CsvDataset {
+  dataset_id: string
+  filename: string
+  delimiter: string
+  rows: number
+  total_rows: number
+  truncated: boolean
+  columns: CsvColumnProfile[]
+  numeric_columns: string[]
+  categorical_columns: string[]
+  head: string[][]
+  warning: string
+}
+
+/** Agent 的选图结论 —— 单独留一份是为了让界面能显示"为什么选它"。 */
+export interface VisualizePlan {
+  chart_type: ChartType
+  x: string
+  y: string[]
+  title: string
+  ylabel: string
+  rationale: string
+}
+
+export interface VisualizeResult {
+  chart_type: string
+  caption: string
+  /** base64 PNG（不含 data: 前缀）；没渲染成功时为 null。 */
+  image: string | null
+  mime: string
+  renderer: string
+  warning: string
+  rationale: string
+  plan: Partial<VisualizePlan>
+  spec: Record<string, unknown>
+  elapsed_ms: number
+}
+
+// ---------------------------------------------------------------- 学术翻译
+
+export type Lang = 'zh' | 'en'
+
+export interface GlossaryEntry {
+  source: string
+  target: string
+}
+
+export interface GlossaryParseResult {
+  entries: GlossaryEntry[]
+  /** 认不出成对关系的行，原样回传 —— 静默丢掉会让人以为术语表已生效。 */
+  skipped: string[]
+  total_lines: number
+}
+
+/** `id` 形如 p1/p2，是左右两栏滚动同步的锚点。 */
+export interface TranslatedParagraph {
+  id: string
+  index: number
+  source: string
+  target: string
+}
+
+export interface TranslateParagraphsResult {
+  language: string
+  paragraphs: TranslatedParagraph[]
+  source_text: string
+  target_text: string
+  glossary: GlossaryEntry[]
+  /** 术语表里没在原文出现的词条（原文侧）—— 术语表配错时唯一的线索。 */
+  unused_terms: string[]
+  usage: Record<string, number>
+}

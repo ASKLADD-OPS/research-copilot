@@ -49,6 +49,22 @@ from app.schemas.qa import (
     TraceResult,
 )
 from app.schemas.tool import ToolCallRequest, ToolCallResult, ToolInfo, ToolListOut
+from app.schemas.translate import (
+    GlossaryEntry,
+    GlossaryParseResult,
+    TranslateParagraphsRequest,
+    TranslateParagraphsResult,
+    TranslatedParagraph,
+)
+from app.schemas.visualize import (
+    ChartPlanOut,
+    ChartType,
+    ColumnDtype,
+    CsvColumnProfile,
+    CsvDatasetOut,
+    VisualizeRequest,
+    VisualizeResult,
+)
 from app.schemas.writing import (
     BilingualPair,
     CitationCheck,
@@ -79,6 +95,11 @@ __all__ = [
     "ChunkOut",
     "CitationCheck",
     "CitationOut",
+    "ChartPlanOut",
+    "ChartType",
+    "ColumnDtype",
+    "CsvColumnProfile",
+    "CsvDatasetOut",
     "DbHealthReport",
     "DiagramRequest",
     "DiagramResult",
@@ -86,6 +107,8 @@ __all__ = [
     "ExploreRequest",
     "ExpandRequest",
     "ExpandResult",
+    "GlossaryEntry",
+    "GlossaryParseResult",
     "GraphAnalysisRequest",
     "GraphAnalysisResult",
     "GraphBuildRequest",
@@ -127,8 +150,13 @@ __all__ = [
     "ToolListOut",
     "TraceRequest",
     "TraceResult",
+    "TranslateParagraphsRequest",
+    "TranslateParagraphsResult",
+    "TranslatedParagraph",
     "TranslateRequest",
     "TranslateResult",
+    "VisualizeRequest",
+    "VisualizeResult",
     "WriteRequest",
     "WriteResult",
     "WritingTemplateOut",
