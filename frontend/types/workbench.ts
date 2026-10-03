@@ -104,8 +104,9 @@ export interface GraphConfig {
   edgeLength: [number, number]
   /** 向心力，越大越向中心收拢 */
   gravity: number
-  /** 节点总数 ≤ labelMaxNodes 时才默认显示标签 */
+  /** 关掉就一个标签都不画（hover 时仍会显示） */
   showLabels: boolean
+  /** 标签只给 PageRank 前 N 名 —— 引文图里给所有节点标标题等于没标 */
   labelMaxNodes: number
   colorBy: GraphColorBy
   /** 度数低于此值的节点直接不画 —— 引文图里大量孤立点是纯噪音 */

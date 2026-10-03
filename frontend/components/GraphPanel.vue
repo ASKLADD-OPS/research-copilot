@@ -9,12 +9,11 @@ import {
   PhArrowsClockwise,
   PhGraph,
   PhSlidersHorizontal,
-  PhCrosshair,
   PhChartLine,
   PhFileText,
   PhFunnel,
   PhMagicWand,
-  PhCalendarBlank,
+  PhCrosshair,
 } from '@phosphor-icons/vue'
 import type { AnalysisKind, Survey } from '~/types/api'
 import type { GraphColorBy, GraphLayout } from '~/types/workbench'
@@ -25,6 +24,8 @@ const selection = useSelectionStore()
 const ui = useUiStore()
 
 const showConfig = ref(true)
+/** 画布真正画出来的规模 —— 年份/度数/社区隐藏都在图谱组件里过滤，只有它知道确数 */
+const stats = ref({ nodes: 0, edges: 0 })
 
 const LAYOUTS: ReadonlyArray<{ value: GraphLayout; label: string }> = [
   { value: 'force', label: '力导向' },
@@ -118,7 +119,7 @@ onMounted(() => {
     :icon="PhGraph"
     side="left"
     :collapsible="false"
-    :meta="graph.visibleNodes.length ? `${graph.visibleNodes.length} 节点 · ${graph.visibleEdges.length} 边` : ''"
+    :meta="stats.nodes ? `${stats.nodes} 节点 · ${stats.edges} 边` : ''"
   >
     <template #actions>
       <button type="button" :class="iconBtnCls('sm')" title="重新载入" @click="graph.load()">
@@ -182,16 +183,18 @@ onMounted(() => {
     <div class="relative flex h-full">
       <div class="relative min-w-0 flex-1">
         <ClientOnly>
-          <ForceGraph
-            :nodes="graph.visibleNodes"
-            :edges="graph.visibleEdges"
+          <CitationGraph
+            :nodes="graph.nodes"
+            :edges="graph.edges"
             :config="graph.config"
             :selected-id="graph.selectedNodeId"
-            :max-in-degree="graph.maxInDegree"
-            :max-page-rank="graph.maxPageRank"
-            :max-degree="graph.maxDegree"
+            :year-from="graph.yearFrom"
+            :year-to="graph.yearTo"
             @select="graph.selectNode($event)"
             @open="openNode"
+            @update:year-from="graph.setYearRange($event, graph.yearTo)"
+            @update:year-to="graph.setYearRange(graph.yearFrom, $event)"
+            @stats="stats = $event"
           />
           <template #fallback>
             <div class="grid h-full place-items-center"><AppSpinner :size="18" /></div>
@@ -219,18 +222,6 @@ onMounted(() => {
               {{ graph.errorMessage || '解释完文献后点「重建引文边」；已有数据但被参数滤空了就调低「最小度数」。' }}
             </span>
           </div>
-        </div>
-
-        <!-- 图例与操作提示：力导向图没有图例就不可能读懂 -->
-        <div
-          class="pointer-events-none absolute bottom-2.5 left-2.5 flex max-w-[70%] flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-surface/90 px-2 py-1.5 text-2xs text-ink-4 shadow-xs"
-        >
-          <span class="inline-flex items-center gap-1"><PhCrosshair :size="10" />滚轮缩放 · 拖拽平移</span>
-          <span>单击选中</span>
-          <span>双击进 PDF</span>
-          <span>箭头 = 引用方向（citing → cited）</span>
-          <span v-if="graph.truncated" class="text-warn">已按度数裁剪到上限</span>
-          <span v-if="graph.isolatedCount" class="text-warn">{{ graph.isolatedCount }} 个孤立节点</span>
         </div>
 
         <!-- 选中节点卡片 -->
@@ -308,46 +299,6 @@ onMounted(() => {
           <button type="button" class="text-2xs text-ink-4 hover:text-ink" @click="graph.resetConfig()">
             重置
           </button>
-        </div>
-
-        <div :class="FIELD_CLS">
-          <span :class="LABEL_CLS">
-            <span class="inline-flex items-center gap-1"><PhCalendarBlank :size="10" />年份区间</span>
-          </span>
-          <div class="flex items-center gap-1.5">
-            <input
-              :class="INPUT_CLS"
-              type="number"
-              inputmode="numeric"
-              class="!h-6.5 text-[11.5px]"
-              :placeholder="graph.yearBounds ? String(graph.yearBounds.min) : '起'"
-              :value="graph.yearFrom ?? ''"
-              aria-label="起始年份"
-              @change="graph.setYearRange(($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null, graph.yearTo)"
-            />
-            <span class="text-2xs text-ink-4">–</span>
-            <input
-              :class="INPUT_CLS"
-              type="number"
-              inputmode="numeric"
-              class="!h-6.5 text-[11.5px]"
-              :placeholder="graph.yearBounds ? String(graph.yearBounds.max) : '止'"
-              :value="graph.yearTo ?? ''"
-              aria-label="结束年份"
-              @change="graph.setYearRange(graph.yearFrom, ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : null)"
-            />
-          </div>
-          <p class="text-2xs leading-snug text-ink-4">
-            只画这一段年份的论文；没解析出年份的节点在不设限时才显示。
-            <button
-              v-if="graph.yearFrom !== null || graph.yearTo !== null"
-              type="button"
-              class="ml-1 text-brand hover:underline"
-              @click="graph.resetYearRange()"
-            >
-              清除
-            </button>
-          </p>
         </div>
 
         <div
@@ -461,12 +412,11 @@ onMounted(() => {
 
         <RangeField
           :model-value="graph.config.labelMaxNodes"
-          label="标签上限"
-          :min="10"
-          :max="200"
-          :step="10"
-          suffix=" 个"
-          hint="节点数超过它就不再画标签，否则会变成一张灰纸"
+          label="标签数"
+          :min="0"
+          :max="40"
+          suffix=" 篇"
+          hint="只给 PageRank 前 N 名画标题 —— 全画出来是一张灰纸，画 0 张又读不懂图"
           @update:model-value="graph.patchConfig({ labelMaxNodes: $event })"
         />
 
@@ -493,9 +443,14 @@ onMounted(() => {
     </div>
 
     <template #footer>
-      <p class="flex items-center gap-1.5 px-2.5 py-1.5 text-2xs text-ink-4">
-        <PhChartLine :size="11" />
-        参数会记住（存本机）。后端按度数裁剪到 300 节点，此处只做展示层的再过滤。双击节点直接进 PDF。
+      <p class="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 px-2.5 py-1.5 text-2xs text-ink-4">
+        <span class="inline-flex items-center gap-1"><PhCrosshair :size="11" />滚轮缩放 · 拖拽平移</span>
+        <span>单击选中并展开邻居</span>
+        <span>双击进 PDF</span>
+        <span>箭头 = 引用方向（citing → cited）</span>
+        <span v-if="graph.isolatedCount" class="text-warn">{{ graph.isolatedCount }} 个孤立节点</span>
+        <span v-if="graph.truncated" class="text-warn">后端已按度数裁剪到 300</span>
+        <span class="inline-flex items-center gap-1"><PhChartLine :size="11" />参数存本机</span>
       </p>
     </template>
   </AppPanel>

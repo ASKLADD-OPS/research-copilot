@@ -13,11 +13,13 @@ import type { GraphConfig } from '~/types/workbench'
 
 export const DEFAULT_GRAPH_CONFIG: GraphConfig = {
   layout: 'force',
-  repulsion: 420,
-  edgeLength: [40, 150],
-  gravity: 0.08,
+  // 斥力 300 / 边长 50–150 / 向心 0.1 = 20 篇能看清、50 篇不糊的那一组
+  repulsion: 300,
+  edgeLength: [50, 150],
+  gravity: 0.1,
   showLabels: true,
-  labelMaxNodes: 40,
+  // 标签只给 PageRank 前 10 名：全画出来是一张灰纸，画 0 张又读不懂图
+  labelMaxNodes: 10,
   colorBy: 'community',
   minDegree: 0,
   nodeScale: 1,
@@ -25,7 +27,9 @@ export const DEFAULT_GRAPH_CONFIG: GraphConfig = {
   highlightNeighbors: true,
 }
 
-const CONFIG_KEY = 'rc-graph-config'
+// v2：力参数与标签上限都换了默认值。不换 key 的话，本机存过的旧配置会盖住新默认值，
+// 于是"改了默认值但打开还是老样子"。
+const CONFIG_KEY = 'rc-graph-config-v2'
 
 /**
  * 引文图谱。
