@@ -21,7 +21,7 @@ import {
   PhWarningCircle,
   PhX,
 } from '@phosphor-icons/vue'
-import type { GlossaryEntry, TranslateParagraphsResult } from '~/types/api'
+import type { GlossaryEntry, SourceBlock, TranslateParagraphsResult, TranslatedParagraph } from '~/types/api'
 
 definePageMeta({ layout: false })
 
@@ -31,6 +31,11 @@ useHead({
 })
 
 const api = useApi()
+const library = useLibraryStore()
+
+// ------------------------------------------------------------------ 视图
+/** 纯文本（贴一段翻一段） / PDF 对照（左 PDF 右译文，滚动联动）。 */
+const view = ref<'text' | 'pdf'>('text')
 
 // ------------------------------------------------------------------ 参数
 const target = ref<'en' | 'zh'>('en')
@@ -41,6 +46,11 @@ const syncScroll = ref(true)
 const TARGETS = [
   { value: 'en' as const, label: '中 → 英' },
   { value: 'zh' as const, label: '英 → 中' },
+]
+
+const VIEWS = [
+  { value: 'text' as const, label: '纯文本' },
+  { value: 'pdf' as const, label: 'PDF 对照' },
 ]
 
 // ------------------------------------------------------------------ 术语表
@@ -109,6 +119,58 @@ async function translate() {
 }
 
 const paragraphs = computed(() => result.value?.paragraphs ?? [])
+
+// ------------------------------------------------------------------ PDF 对照
+/**
+ * 把已入库论文的**检索块**直接当成段落送进 `/translate`。
+ *
+ * 为什么用块而不是正文全文：块自带 `page` + 归一化 `bbox`（见后端 `ChunkOut`），
+ * 后端原样回传，前端才能把每段译文挂回 PDF 上的那个位置 —— 这是左右联动的全部依据。
+ * 让前端自己按空行切全文会被迫再猜一次坐标，等于把已经算好的版面信息扔掉。
+ */
+const paperId = ref('')
+const pairs = ref<TranslatedParagraph[]>([])
+const pairBusy = ref(false)
+const pairError = ref('')
+
+const pdfUrl = computed(() => (paperId.value ? library.pdfUrl(paperId.value) : ''))
+const readyPapers = computed(() => library.items.filter((p) => p.status === 'ready'))
+
+async function buildPairs() {
+  if (!paperId.value || pairBusy.value) return
+  pairBusy.value = true
+  pairError.value = ''
+  pairs.value = []
+  try {
+    const chunks = await library.fetchChunks(paperId.value, 200)
+    const blocks: SourceBlock[] = chunks
+      .filter((c) => c.content?.trim())
+      .map((c) => ({
+        id: `c${c.id}`,
+        text: c.content,
+        page: c.page ?? c.page_start ?? null,
+        bbox: c.bbox,
+      }))
+    if (!blocks.length) throw new Error('这篇论文还没有正文块 —— 等它解析完（状态「可检索」）再来')
+
+    const res = await api.post<TranslateParagraphsResult>('/translate', {
+      blocks,
+      target: target.value,
+      glossary: glossary.value,
+      keep_terms: keepTerms.value,
+      passive: passive.value,
+    })
+    pairs.value = res.paragraphs
+  } catch (err) {
+    pairError.value = (err as Error).message
+  } finally {
+    pairBusy.value = false
+  }
+}
+
+onMounted(() => {
+  if (!library.loaded) void library.load()
+})
 
 // ------------------------------------------------------------------ 滚动同步
 /**
@@ -292,7 +354,36 @@ function download() {
           <PhX :size="10" />
         </button>
       </span>
+      <span v-else-if="view === 'pdf'" class="text-2xs text-ink-4">
+        选一篇已入库的论文 —— 段落按检索块切，页码与坐标由后端原样回传
+      </span>
       <span v-else class="text-2xs text-ink-4">术语表：每行 <code class="font-mono">原文,译名</code></span>
+    </div>
+
+    <!-- PDF 对照：选文献 + 生成 -->
+    <div
+      v-if="view === 'pdf'"
+      class="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline bg-surface px-3 py-2"
+    >
+      <select v-model="paperId" :class="SELECT_CLS" class="max-w-80">
+        <option value="">选择文献…</option>
+        <option v-for="p in readyPapers" :key="p.id" :value="p.id">{{ p.title || `#${p.id}` }}</option>
+      </select>
+      <button
+        type="button"
+        :class="btnCls('primary', { size: 'sm' })"
+        :disabled="!paperId || pairBusy"
+        @click="buildPairs"
+      >
+        <AppSpinner v-if="pairBusy" :size="11" />
+        <PhTranslate v-else :size="11" weight="fill" />
+        {{ pairBusy ? '正在逐块翻译…' : '生成对照' }}
+      </button>
+      <span v-if="pairs.length" :class="pillCls('brand')">{{ pairs.length }} 段已对齐</span>
+      <span v-if="!readyPapers.length && library.loaded" class="text-2xs text-ink-4">
+        文献库里还没有「可检索」的论文，先去工作台上传一篇
+      </span>
+      <p v-if="pairError" class="w-full rounded-md bg-bad-soft px-2 py-1 text-2xs text-bad">{{ pairError }}</p>
     </div>
 
     <p v-if="glossarySkipped.length" class="shrink-0 bg-warn-soft px-3 py-1.5 text-2xs leading-relaxed text-warn">
@@ -302,8 +393,36 @@ function download() {
     </p>
     <p v-if="glossaryError" class="shrink-0 bg-bad-soft px-3 py-1.5 text-2xs text-bad">{{ glossaryError }}</p>
 
+    <!-- ---------------------------------------------------------------- PDF 对照 -->
+    <div v-if="view === 'pdf'" class="relative min-h-0 flex-1">
+      <ClientOnly>
+        <BilingualScroll
+          v-if="pairs.length && pdfUrl"
+          :segments="pairs"
+          :paper-id="paperId"
+          :pdf-url="pdfUrl"
+        />
+        <template #fallback>
+          <div class="grid h-full place-items-center bg-sunken">
+            <AppSpinner :size="18" class="text-ink-3" />
+          </div>
+        </template>
+      </ClientOnly>
+
+      <div v-if="!pairs.length" class="grid h-full place-items-center px-6">
+        <div :class="EMPTY_CLS">
+          <PhTranslate :size="22" class="mb-1.5 text-ink-4" />
+          <strong class="text-[13px] text-ink-2">还没有对照数据</strong>
+          <span class="max-w-80 text-2xs leading-relaxed text-ink-4">
+            上面选一篇已入库的论文、点「生成对照」：正文按检索块逐块翻译，块自带的页码与归一化坐标
+            一起回传，左栏 PDF 与右栏译文就能按段落互相定位（滚一侧，另一侧跟过去）。
+          </span>
+        </div>
+      </div>
+    </div>
+
     <!-- ---------------------------------------------------------------- 两栏 -->
-    <div v-if="!result" class="flex min-h-0 flex-1 flex-col gap-2 p-3">
+    <div v-if="view === 'text' && !result" class="flex min-h-0 flex-1 flex-col gap-2 p-3">
       <div class="flex min-h-0 flex-1 flex-col gap-1.5">
         <div class="flex shrink-0 items-center gap-1.5">
           <span class="text-2xs font-semibold text-ink-2">原文</span>
@@ -348,7 +467,7 @@ function download() {
       </aside>
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-2">
+    <div v-else-if="view === 'text' && result" class="grid min-h-0 flex-1 grid-cols-2">
       <!-- 原文 -->
       <section class="flex min-h-0 flex-col border-r border-hairline">
         <div class="flex h-8 shrink-0 items-center gap-1.5 border-b border-hairline bg-surface px-3">

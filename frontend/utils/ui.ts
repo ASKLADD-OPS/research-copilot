@@ -118,3 +118,76 @@ export function rectsFromBbox(bbox: unknown): NormRect[] {
   const boxes = (bbox as { boxes?: unknown[] } | null | undefined)?.boxes
   return Array.isArray(boxes) ? boxes.map(corners).filter((r): r is NormRect => r !== null) : []
 }
+
+// ---------------------------------------------------------------- 段落 ↔ PDF 位置
+
+/** 一条"在 PDF 上有位置"的段落。`bbox` 形态同 `Chunk.bbox`。 */
+export interface AnchoredSegment {
+  id: string
+  /** 1-based */
+  page?: number | null
+  bbox?: unknown
+}
+
+/** 段落中心在页面上的归一化纵坐标；没有 bbox 就是 null（定位不了，只能跳过）。 */
+export function centerY(bbox: unknown): number | null {
+  const r = rectsFromBbox(bbox)[0]
+  return r ? r.y + r.h / 2 : null
+}
+
+/**
+ * 同页里 bbox 中心最接近 `y` 的那一段。
+ *
+ * 按"最接近"而不是"包含"：段落之间的行间空白、公式块在 bbox 上是断开的，
+ * 严格包含会有一大片区域谁都挑不出来 —— 表现为滚到某处对侧突然不动了。
+ */
+export function nearestByY<T extends AnchoredSegment>(items: T[], page: number, y: number): T | null {
+  let best: T | null = null
+  let bestDist = Infinity
+  for (const it of items) {
+    if (it.page !== page) continue
+    const cy = centerY(it.bbox)
+    if (cy === null) continue
+    const d = Math.abs(cy - y)
+    if (d < bestDist) {
+      bestDist = d
+      best = it
+    }
+  }
+  return best
+}
+
+// ---------------------------------------------------------------- 探针线判定
+
+/** 滚动容器里一条东西的纵向量度（像素，相对容器顶边）。 */
+export interface BandBox {
+  id: string
+  top: number
+  bottom: number
+}
+
+/**
+ * 探针线扫过的那一条。
+ *
+ * 不能退化成"候选里的第一条"：探针带只有容器高度的 8%（实测 512px 的面板上是 41px），
+ * 而一条常有 100px 以上，于是**上一条的尾巴也压在带里**，按顺序取会稳定地慢一条 ——
+ * 表现是高亮"总是差一行"。跨线的最多一条；万一线正好落在条间空隙里，退回离它最近的边。
+ */
+export function pickAtLine<T extends BandBox>(boxes: T[], line: number): T | null {
+  let hit: T | null = null
+  let hitTop = -Infinity
+  let near: { box: T; d: number } | null = null
+  for (const b of boxes) {
+    if (b.top <= line && b.bottom >= line) {
+      // 跨线的理论上唯一；真出现重叠就取更靠下的那条（后出现的那条才是阅读位置）
+      if (b.top > hitTop) {
+        hitTop = b.top
+        hit = b
+      }
+    } else {
+      const d = Math.min(Math.abs(b.top - line), Math.abs(b.bottom - line))
+      if (!near || d < near.d) near = { box: b, d }
+    }
+  }
+  return hit ?? near?.box ?? null
+}

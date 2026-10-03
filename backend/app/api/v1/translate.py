@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, UploadFile
 from loguru import logger
@@ -127,6 +127,10 @@ async def upload_glossary(
 async def translate_paragraphs(payload: TranslateParagraphsRequest) -> ApiResponse[TranslateParagraphsResult]:
     """按空行切段 → 并发翻译（上限 4）→ 回传 `p1/p2/…` 的段落映射。
 
+    给了 `blocks`（`GET /papers/{id}/chunks` 的输出）就不切段：`id`/`page`/`bbox`
+    原样带走，前端据此把每段译文挂回 PDF 上的位置。两条路走同一段并发代码，
+    只是"单元"的来源不同 —— 分叉开写会漏掉一边。
+
     `glossary` 里"命中即必须照译"的约束随每段一起下发；`unused_terms` 告诉你哪些词条
     在原文里根本没出现过 —— 术语表配错了（拼写、大小写）时，这一条是唯一的线索。
     """
@@ -134,11 +138,20 @@ async def translate_paragraphs(payload: TranslateParagraphsRequest) -> ApiRespon
     from app.llm.client import usage_delta, usage_snapshot
 
     usage_base = usage_snapshot()
-    blocks = split_paragraphs(payload.text)
+    # (id, 原文, 页码, 坐标)：纯文本输入时后两项是 None，契约不变
+    units: list[tuple[str, str, int | None, Any | None]] = (
+        [(b.id, b.text, b.page, b.bbox) for b in payload.blocks]
+        if payload.blocks
+        else [(f"p{i + 1}", b, None, None) for i, b in enumerate(split_paragraphs(payload.text))]
+    )
+    if not units:
+        raise BadRequestError("这两条路都不该产出空段落，到这里说明入参校验漏了")
+
     terms = {e.source: e.target for e in payload.glossary[:200]}
     gate = asyncio.Semaphore(_CONCURRENCY)
 
-    async def one(index: int, block: str) -> TranslatedParagraph:
+    async def one(index: int, unit: tuple[str, str, int | None, Any | None]) -> TranslatedParagraph:
+        pid, block, page, bbox = unit
         async with gate:
             out = await translate_text(
                 block,
@@ -147,13 +160,15 @@ async def translate_paragraphs(payload: TranslateParagraphsRequest) -> ApiRespon
                 glossary=terms,
                 passive=payload.passive,
             )
-        return TranslatedParagraph(id=f"p{index + 1}", index=index, source=block, target=str(out.get("text", "")))
+        return TranslatedParagraph(
+            id=pid, index=index, source=block, target=str(out.get("text", "")), page=page, bbox=bbox
+        )
 
-    paragraphs = list(await asyncio.gather(*(one(i, b) for i, b in enumerate(blocks))))
+    paragraphs = list(await asyncio.gather(*(one(i, u) for i, u in enumerate(units))))
 
     # 大小写不敏感：句首大写过的 "Attention" 与词条 "attention" 是同一个词，
     # 按原样比对会把它报成"没用上"，这种假警报会让人不再看这个字段
-    lowered = payload.text.lower()
+    lowered = (payload.text or "\n".join(u[1] for u in units)).lower()
     unused = [e.source for e in payload.glossary if e.source.lower() not in lowered]
     result = TranslateParagraphsResult(
         language=payload.target,

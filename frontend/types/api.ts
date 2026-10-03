@@ -84,6 +84,10 @@ export interface PaperChunk {
   section_name?: string | null
   page_start?: number | null
   page_end?: number | null
+  /** 后端 `ChunkOut.page`（1-based）。PDF 对照要用它翻页。 */
+  page?: number | null
+  /** 后端 `ChunkOut.bbox`，归一化坐标。有它才能在 PDF 上画框。 */
+  bbox?: unknown
   token_count: number
 }
 
@@ -778,12 +782,24 @@ export interface GlossaryParseResult {
   total_lines: number
 }
 
-/** `id` 形如 p1/p2，是左右两栏滚动同步的锚点。 */
+/** 一段原文 / 译文 / 它在 PDF 上的位置。`id` 是左右两栏滚动同步的锚点。 */
 export interface TranslatedParagraph {
   id: string
   index: number
   source: string
   target: string
+  /** `POST /translate` 走 `blocks` 时由后端原样回传；纯文本输入时为 null。 */
+  page?: number | null
+  /** 归一化坐标，形态见 `Citation.bbox`。 */
+  bbox?: unknown
+}
+
+/** 交给 `POST /translate` 的 `blocks` —— 直接来自 `GET /papers/{id}/chunks`。 */
+export interface SourceBlock {
+  id: string
+  text: string
+  page?: number | null
+  bbox?: unknown
 }
 
 export interface TranslateParagraphsResult {

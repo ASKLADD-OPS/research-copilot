@@ -13,7 +13,7 @@
  * 「复制」全部免费获得，不需要自己实现选区逻辑。
  */
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
-import type { ReaderTarget, NormRect } from '~/types/workbench'
+import type { ReaderTarget, NormRect, HighlightRef } from '~/types/workbench'
 
 const props = withDefaults(
   defineProps<{
@@ -27,8 +27,14 @@ const props = withDefaults(
     fitWidth?: boolean
     /** 跳转指令。只认 nonce，这样连点同一处引用也能再次定位 */
     target?: ReaderTarget | null
+    /** 段落级高亮：`[{id, page, bbox}]`，只画当前页的。双语对照用 */
+    highlights?: HighlightRef[]
+    /** `highlights` 里哪一条是"当前段"（实心强调），其余画成淡底 */
+    activeId?: string | null
+    /** 左侧缩略图轨 */
+    thumbs?: boolean
   }>(),
-  { scale: 1.2, fitWidth: false, target: null },
+  { scale: 1.2, fitWidth: false, target: null, highlights: () => [], activeId: null, thumbs: false },
 )
 
 const emit = defineEmits<{
@@ -37,6 +43,13 @@ const emit = defineEmits<{
   'update:pageCount': [value: number]
   /** 划词产生的锚点 */
   select: [selection: { paperId: string; page: number; text: string; rects: NormRect[] }]
+  /**
+   * 滚动位置。`y` 是**视口中心对应的页内归一化纵坐标**（0~1）。
+   *
+   * 给的是 `y` 而不是 `scrollTop`：对侧要的是"现在在看哪一段"，像素值离开这个
+   * 容器的尺寸就没有意义了，缩放一下全部作废。
+   */
+  scroll: [position: { page: number; y: number; top: number }]
 }>()
 
 const scroller = ref<HTMLElement | null>(null)
@@ -66,6 +79,8 @@ async function load() {
   loading.value = true
   errorMessage.value = ''
   highlightRects.value = []
+  // 换了文档，缩略图的"画过了"标记必须清掉，否则新文档会沿用旧文档的缩略图
+  railEl.value?.querySelectorAll('canvas').forEach((c) => delete (c as HTMLElement).dataset.done)
   try {
     const pdfjs = await import('pdfjs-dist')
     // Vite 会把 worker 文件当 asset 处理，这里拿到的是它的真实 URL
@@ -163,6 +178,10 @@ async function render() {
 
   // 换页/换缩放后把上一次的定位重放一遍，否则点完引用一缩放高亮就没了
   if (props.target && props.target.page === props.page) replayTarget(props.target)
+
+  // 页尺寸变了，滚动位置也得重新广播一次（对侧按 `y` 比例对齐）
+  emitScroll()
+  void drawThumbs()
 }
 
 // ---------------------------------------------------------------- 划词
@@ -285,6 +304,89 @@ function rectStyle(r: NormRect) {
   }
 }
 
+// ---------------------------------------------------------------- 段落高亮（双语对照）
+
+/** 当前页上要画的段落框。跨页的段落在翻页前先不画 —— 画出来只会是一片错位的紫块。 */
+const segBoxes = computed(() =>
+  (props.highlights ?? [])
+    .filter((h) => h.page === props.page)
+    .map((h) => ({ id: h.id, active: h.id === props.activeId, rects: rectsFromBbox(h.bbox) }))
+    .filter((b) => b.rects.length > 0),
+)
+
+// ---------------------------------------------------------------- 滚动位置
+
+let rafId = 0
+
+/** 视口中心落在页内哪个归一化高度 —— 对侧拿它去挑"最接近的那一段"。 */
+function emitScroll() {
+  const el = scroller.value
+  if (!el) return
+  const box = pageEl.value?.getBoundingClientRect()
+  const center = el.getBoundingClientRect().top + el.clientHeight / 2
+  const y = box && box.height ? Math.min(1, Math.max(0, (center - box.top) / box.height)) : 0
+  emit('scroll', { page: props.page, y, top: el.scrollTop })
+}
+
+/** 一帧一次。scroll 事件的频率远高于渲染帧，不节流的话每像素都要算一次布局。 */
+function onScroll() {
+  if (rafId) return
+  rafId = requestAnimationFrame(() => {
+    rafId = 0
+    emitScroll()
+  })
+}
+
+// ---------------------------------------------------------------- 缩略图
+
+const railEl = ref<HTMLElement | null>(null)
+
+/**
+ * 画一张缩略图。`data-done` 做一次性标记 —— 重绘一次白花几十毫秒，
+ * 而缩略图只在换文档时才会变。
+ */
+async function drawThumb(canvas: HTMLCanvasElement) {
+  const d = doc.value
+  if (!d || canvas.dataset.done) return
+  canvas.dataset.done = '1'
+  const num = Number(canvas.dataset.page)
+  if (!Number.isInteger(num) || num < 1) return
+  try {
+    const p = await d.getPage(num)
+    const base = p.getViewport({ scale: 1 })
+    // 宽度按轨道实际宽度反算，缩略图才不会糊（写死 80px 在宽轨道上会糊成一团）
+    const width = Math.max(60, railEl.value?.clientWidth ? railEl.value.clientWidth - 16 : 80)
+    const viewport = p.getViewport({ scale: width / base.width })
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = Math.floor(viewport.width * dpr)
+    canvas.height = Math.floor(viewport.height * dpr)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    await p
+      .render({
+        canvasContext: ctx,
+        viewport,
+        transform: dpr === 1 ? undefined : [dpr, 0, 0, dpr, 0, 0],
+      })
+      .promise.catch(() => undefined)
+  } catch {
+    // 单张缩略图失败不该影响阅读，静默留白即可
+    delete canvas.dataset.done
+  }
+}
+
+/**
+ * 串行画完所有缩略图。
+ *
+ * ponytail: 没有按需渲染 —— 一次 20 页的论文量级是百毫秒级，比"先接
+ * IntersectionObserver 再调半天可见性"便宜得多。页数上百再换成按需。
+ */
+async function drawThumbs() {
+  if (!props.thumbs || !doc.value) return
+  const canvases = Array.from(railEl.value?.querySelectorAll<HTMLCanvasElement>('canvas') ?? [])
+  for (const c of canvases) await drawThumb(c)
+}
+
 // ---------------------------------------------------------------- 副作用
 
 /** 跨页跳转时，定位指令要等新页渲染完才用得上，先存下来。 */
@@ -329,6 +431,16 @@ watch(
   () => void load(),
 )
 
+// 缩略图轨是后开的：canvas 得等 DOM 出来才画得上
+watch(
+  () => props.thumbs,
+  async (on) => {
+    if (!on) return
+    await nextTick()
+    void drawThumbs()
+  },
+)
+
 // 面板拖宽了，适配宽度得跟着重算 —— 不加这个，拖宽面板 PDF 不会跟着变大
 let observer: ResizeObserver | null = null
 
@@ -356,43 +468,85 @@ defineExpose({ render, revealQuote })
 </script>
 
 <template>
-  <div ref="scroller" class="h-full overflow-auto scroll-slim bg-sunken">
-    <div class="flex min-h-full justify-center p-4">
-      <div
-        ref="pageEl"
-        class="relative shrink-0 bg-white shadow-md"
-        :style="cssSize.w ? { width: `${cssSize.w}px`, height: `${cssSize.h}px` } : undefined"
-        @mouseup="onMouseUp"
+  <div class="flex h-full min-h-0">
+    <!-- 缩略图轨：点哪张跳哪页 -->
+    <div
+      v-if="thumbs"
+      ref="railEl"
+      class="w-[104px] shrink-0 space-y-1.5 overflow-y-auto scroll-slim border-r border-hairline bg-surface p-2"
+    >
+      <button
+        v-for="n in pageCount"
+        :key="n"
+        type="button"
+        class="relative block w-full overflow-hidden rounded-sm ring-1 transition-shadow"
+        :class="n === page ? 'ring-2 ring-brand' : 'ring-hairline hover:ring-hairline-2'"
+        :title="`第 ${n} 页`"
+        @click="emit('update:page', n)"
       >
-        <canvas ref="canvasEl" class="block" />
-
-        <!-- 文本层：透明、可选中。样式在 assets/css/main.css 的 .pdf-text-layer -->
-        <div ref="textLayerEl" class="pdf-text-layer" />
-
-        <!-- 高亮层：不吃指针事件，否则会挡住划词 -->
-        <div class="pointer-events-none absolute inset-0">
-          <span
-            v-for="(r, i) in highlightRects"
-            :key="i"
-            class="absolute rounded-[1px] bg-brand/22 ring-1 ring-brand/35 ring-inset"
-            :style="rectStyle(r)"
-          />
-        </div>
-
-        <div
-          v-if="loading"
-          class="absolute inset-0 grid place-items-center bg-white/60 backdrop-blur-[1px]"
-        >
-          <AppSpinner :size="18" class="text-ink-3" />
-        </div>
-      </div>
+        <canvas :data-page="n" class="block w-full bg-white" />
+        <span class="absolute bottom-0 right-0 rounded-tl-sm bg-ink/55 px-1 text-[9px] text-white">{{ n }}</span>
+      </button>
+      <p v-if="!pageCount" class="py-4 text-center text-[10px] text-ink-4">—</p>
     </div>
 
-    <p v-if="errorMessage" class="mx-4 mb-4 rounded-md bg-bad-soft px-3 py-2 text-2xs text-bad">
-      {{ errorMessage }}
-    </p>
-    <p v-else-if="pageCount && !cssSize.w && !loading" class="mx-4 text-2xs text-ink-4">
-      正在准备页面…
-    </p>
+    <div
+      ref="scroller"
+      data-pdf-scroller
+      class="h-full min-w-0 flex-1 overflow-auto scroll-slim bg-sunken"
+      @scroll.passive="onScroll"
+    >
+      <div class="flex min-h-full justify-center p-4">
+        <div
+          ref="pageEl"
+          class="relative shrink-0 bg-white shadow-md"
+          :style="cssSize.w ? { width: `${cssSize.w}px`, height: `${cssSize.h}px` } : undefined"
+          @mouseup="onMouseUp"
+        >
+          <canvas ref="canvasEl" class="block" />
+
+          <!-- 文本层：透明、可选中。样式在 assets/css/main.css 的 .pdf-text-layer -->
+          <div ref="textLayerEl" class="pdf-text-layer" />
+
+          <!-- 段落高亮层：先画淡底，当前段再叠一层实心的（不吃指针事件，否则挡住划词） -->
+          <div class="pointer-events-none absolute inset-0">
+            <template v-for="b in segBoxes" :key="b.id">
+              <span
+                v-for="(r, i) in b.rects"
+                :key="i"
+                :data-hl="b.active ? b.id : undefined"
+                class="absolute rounded-[2px]"
+                :class="b.active ? 'bg-brand/25 ring-1 ring-brand/55 ring-inset' : 'bg-brand/8 ring-1 ring-brand/15 ring-inset'"
+                :style="rectStyle(r)"
+              />
+            </template>
+          </div>
+
+          <!-- 高亮层：划词 / 引用定位 -->
+          <div class="pointer-events-none absolute inset-0">
+            <span
+              v-for="(r, i) in highlightRects"
+              :key="i"
+              class="absolute rounded-[1px] bg-brand/22 ring-1 ring-brand/35 ring-inset"
+              :style="rectStyle(r)"
+            />
+          </div>
+
+          <div
+            v-if="loading"
+            class="absolute inset-0 grid place-items-center bg-white/60 backdrop-blur-[1px]"
+          >
+            <AppSpinner :size="18" class="text-ink-3" />
+          </div>
+        </div>
+      </div>
+
+      <p v-if="errorMessage" class="mx-4 mb-4 rounded-md bg-bad-soft px-3 py-2 text-2xs text-bad">
+        {{ errorMessage }}
+      </p>
+      <p v-else-if="pageCount && !cssSize.w && !loading" class="mx-4 text-2xs text-ink-4">
+        正在准备页面…
+      </p>
+    </div>
   </div>
 </template>

@@ -9,7 +9,8 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "typecheck": "nuxt typecheck",
-    "check:md": "node scripts/md-check.mjs"
+    "check:md": "node scripts/md-check.mjs",
+    "check:sync": "node scripts/scroll-sync-check.mjs"
   },
   "dependencies": {
     "@phosphor-icons/vue": "^2.2.1",

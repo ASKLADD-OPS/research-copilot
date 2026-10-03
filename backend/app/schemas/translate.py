@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Lang = Literal["zh", "en"]
 
@@ -34,21 +34,45 @@ class GlossaryParseResult(BaseModel):
     total_lines: int = 0
 
 
+class SourceBlock(BaseModel):
+    """带版式锚点的原文块 —— `GET /papers/{id}/chunks` 的输出直接喂进来即可。
+
+    给了 `blocks` 就不再按空行切 `text`：`id` / `page` / `bbox` 原样带到译文里，
+    前端才能把每一段译文对回 PDF 上的位置（左右联动靠的就是这三个字段）。
+    """
+
+    id: str = Field(min_length=1, max_length=64, description="原样回传，前端用它对齐左右两栏")
+    text: str = Field(min_length=1, max_length=40000)
+    page: int | None = Field(default=None, ge=1)
+    bbox: Any | None = Field(default=None, description="归一化坐标 [x0,y0,x1,y1] 或 {page, boxes}")
+
+
 class TranslateParagraphsRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=40000, description="整篇原文，按空行分段")
+    text: str = Field(default="", max_length=40000, description="整篇原文，按空行分段；给了 blocks 时忽略")
+    blocks: list[SourceBlock] | None = Field(
+        default=None, max_length=300, description="带页码/坐标的区块；给了就按它切段"
+    )
     target: Lang = "zh"
     glossary: list[GlossaryEntry] = Field(default_factory=list, description="术语表（可由 /translate/glossary 解析上传文件得到）")
     keep_terms: bool = Field(default=True, description="术语首次出现时中英对照")
     passive: bool = Field(default=False, description="偏好被动语态与无人称表述")
 
+    @model_validator(mode="after")
+    def _need_input(self) -> TranslateParagraphsRequest:
+        if not self.blocks and not self.text.strip():
+            raise ValueError("text 与 blocks 至少要给一个")
+        return self
+
 
 class TranslatedParagraph(BaseModel):
     """一段原文与它的译文。`id` 是前端做滚动同步时的锚点。"""
 
-    id: str = Field(description="段落 ID，形如 p1 / p2，与 index 一一对应")
+    id: str = Field(description="段落 ID，形如 p1 / p2，与 index 一一对应；来自 blocks 时原样回传")
     index: int = Field(description="段落序号，从 0 起")
     source: str
     target: str
+    page: int | None = Field(default=None, description="原文所在页码；纯文本输入时为 None")
+    bbox: Any | None = Field(default=None, description="原文在 PDF 页内的归一化坐标，前端据此画框")
 
 
 class TranslateParagraphsResult(BaseModel):
@@ -65,6 +89,7 @@ __all__ = [
     "GlossaryEntry",
     "GlossaryParseResult",
     "Lang",
+    "SourceBlock",
     "TranslateParagraphsRequest",
     "TranslateParagraphsResult",
     "TranslatedParagraph",

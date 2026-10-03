@@ -75,6 +75,20 @@ export interface ReaderTarget {
   nonce: number
 }
 
+/**
+ * 一段内容在 PDF 上的位置 —— 段落 ↔ 译文的双向联动靠它。
+ *
+ * 与 `ReaderTarget` 的区别：`ReaderTarget` 是**一次性指令**（要跳、要闪），
+ * 这个是**常驻状态**（这一段现在在哪、是不是当前段），所以要允许只有 page 没有 bbox。
+ */
+export interface HighlightRef {
+  id: string
+  /** 1-based */
+  page: number
+  /** `Chunk.bbox` 的两种形态，一律经 `rectsFromBbox()` 换算 */
+  bbox: unknown
+}
+
 // ---------------------------------------------------------------- 图谱配置
 
 export type GraphLayout = 'force' | 'circular' | 'none'

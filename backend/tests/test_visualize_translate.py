@@ -19,9 +19,11 @@ import io
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from app.api.v1 import translate as translate_api
 from app.schemas import GlossaryEntry, TranslateParagraphsRequest
+from app.schemas.translate import SourceBlock
 from app.visualize import csv_charts
 from app.writing.diagrams import _chart_png
 
@@ -281,6 +283,37 @@ async def test_translate_reports_glossary_terms_that_never_appear(fake_llm: list
         )
     )
     assert res.data.unused_terms == ["Routing"]
+
+
+async def test_blocks_keep_their_own_ids_and_pdf_anchors(fake_llm: list[str]) -> None:
+    """带 `blocks` 时 id/page/bbox 必须**原样**回传。
+
+    这是 PDF 与译文左右联动唯一的地基：一旦这里被重新编号成 p1/p2，
+    前端就会把译文挂到错误的 PDF 位置上，而且看起来一切正常（只是错位）。
+    """
+    res = await translate_api.translate_paragraphs(
+        TranslateParagraphsRequest(
+            blocks=[
+                SourceBlock(id="chunk-12", text="First block.", page=3, bbox=[0.1, 0.2, 0.9, 0.25]),
+                SourceBlock(id="chunk-13", text="Second block.", page=7, bbox=[0.1, 0.3, 0.9, 0.4]),
+            ],
+            glossary=[GlossaryEntry(source="First", target="第一")],
+        )
+    )
+    assert [p.id for p in res.data.paragraphs] == ["chunk-12", "chunk-13"]
+    assert [p.index for p in res.data.paragraphs] == [0, 1]
+    assert [p.page for p in res.data.paragraphs] == [3, 7]
+    assert res.data.paragraphs[0].bbox == [0.1, 0.2, 0.9, 0.25]
+    assert res.data.target_text.count("[TRANSLATED]") == 2
+    # blocks 走的是同一条 unused_terms 逻辑 —— 拼接后的原文里 "First" 确实出现过
+    assert res.data.unused_terms == []
+
+
+@pytest.mark.unit
+def test_request_without_any_text_is_rejected() -> None:
+    """`text` 与 `blocks` 都不给要报 422，而不是静默返回 0 段译文。"""
+    with pytest.raises(ValidationError):
+        TranslateParagraphsRequest(text="   ")
 
 
 # ==================================================================== Test 4：端点接线

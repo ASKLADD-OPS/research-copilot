@@ -52,6 +52,7 @@ from app.schemas.tool import ToolCallRequest, ToolCallResult, ToolInfo, ToolList
 from app.schemas.translate import (
     GlossaryEntry,
     GlossaryParseResult,
+    SourceBlock,
     TranslateParagraphsRequest,
     TranslateParagraphsResult,
     TranslatedParagraph,
@@ -150,6 +151,7 @@ __all__ = [
     "ToolListOut",
     "TraceRequest",
     "TraceResult",
+    "SourceBlock",
     "TranslateParagraphsRequest",
     "TranslateParagraphsResult",
     "TranslatedParagraph",
