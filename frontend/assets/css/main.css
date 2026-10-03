@@ -310,6 +310,45 @@
     background: none;
     font-size: 11.5px;
   }
+  /*
+   * 代码高亮配色（highlight.js 的 .hljs-* 类）。
+   * 刻意不 import highlight.js 自带主题：那些主题会连底色一起写死（github 主题把 pre 刷成
+   * 纯白），跟这里的 sunken 底色打架，改回来还得覆盖它。用现成的状态色写 8 行更省。
+   */
+  .md-body .hljs-comment,
+  .md-body .hljs-quote {
+    color: var(--color-ink-4);
+    font-style: italic;
+  }
+  .md-body .hljs-keyword,
+  .md-body .hljs-selector-tag,
+  .md-body .hljs-literal,
+  .md-body .hljs-name,
+  .md-body .hljs-section {
+    color: var(--color-brand-ink);
+  }
+  .md-body .hljs-string,
+  .md-body .hljs-attr,
+  .md-body .hljs-regexp,
+  .md-body .hljs-addition {
+    color: var(--color-ok);
+  }
+  .md-body .hljs-number,
+  .md-body .hljs-built_in,
+  .md-body .hljs-symbol,
+  .md-body .hljs-variable {
+    color: var(--color-warn);
+  }
+  .md-body .hljs-title,
+  .md-body .hljs-title.function_,
+  .md-body .hljs-title.class_ {
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+  .md-body .hljs-meta,
+  .md-body .hljs-deletion {
+    color: var(--color-bad);
+  }
   .md-body blockquote {
     padding-left: 10px;
     border-left: 2px solid var(--color-hairline-2);

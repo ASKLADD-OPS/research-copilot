@@ -1,5 +1,7 @@
 import MarkdownIt from 'markdown-it'
 import createDOMPurify from 'dompurify'
+// 只要 common 那 40 来个常用语言，不是全量 190+ 语言包（全量 ~1MB，这里 ~180KB）
+import hljs from 'highlight.js/lib/common'
 
 /**
  * Markdown 渲染 + 引用角标 + MathJax 重排。
@@ -13,6 +15,14 @@ const md = new MarkdownIt({
   html: false, // 关掉裸 HTML：正文来自 LLM，不给 XSS 开口子
   linkify: true,
   breaks: true,
+  /**
+   * 代码高亮。返回空串 = 交给 markdown-it 自己转义（比返回未经转义的原码安全，
+   * 也比 highlightAuto 猜语言快 —— 猜错比不猜更难看）。hljs 的 .value 自带转义。
+   */
+  highlight(code, lang) {
+    if (!lang || !hljs.getLanguage(lang)) return ''
+    return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value
+  },
 })
 
 /**

@@ -57,6 +57,15 @@ export default defineNuxtConfig({
         },
       ],
       script: [
+        /*
+         * MathJax 3 的 `tex-mml-chtml` 默认**只认 `\(...\)` 行内公式，不认 `$...$`**，
+         * 而 LLM 输出的行内公式几乎都用 `$...$` —— 实测「其平均开销为 $O(n\log n)$。」
+         * 原样显示成了带美元符号的纯文本。所以先写这份配置，再加载 MathJax。
+         * 顺序是关键：内联脚本同步执行，MathJax（async）读 window.MathJax 时它已经在了。
+         */
+        {
+          innerHTML: String.raw`window.MathJax={tex:{inlineMath:[["$","$"],["\\(","\\)"]]}}`,
+        },
         // MathJax 走 CDN：省掉 ~10MB 的 node 依赖，且只在首屏后异步加载
         {
           src: 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js',
