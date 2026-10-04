@@ -1,0 +1,101 @@
+# ============================================================================
+# Research Copilot · 生产覆盖层
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# 恢复开发形态：
+#   docker compose -f docker-compose.yml up -d
+#
+# 这一层只做四件事，其余全部沿用基础文件：
+#   1. 数据服务 restart: always —— 「在线演示 24h 持续可用」要求进程自愈
+#   2. backend 摘掉代码挂载与 --reload，改多 worker，日志落盘到 ./logs/backend
+#   3. frontend 的 API 基址改成同源相对路径 /api/v1 —— 走 Nginx 就不再跨域
+#   4. 加一个 Nginx 反向代理服务（含 SSE 关缓冲、大文件上传、SPA 兜底）
+#
+# 需要 Compose ≥ v2.24.4（用了 !override 替换数组，见下方注释）
+# ============================================================================
+name: research-copilot
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  # ---------------------------------------------------------------- 后端
+  backend:
+    restart: always
+    environment:
+      ENV: production
+      # 生产日志同时写 stdout（json-file）与 ./logs/backend/app.json（loguru 结构化）
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # !override 整体替换基础文件的 volumes，去掉 ./backend:/app 热更新挂载，
+    # 换成模型缓存卷 + 宿主机日志目录（Nginx/采集器可直接读）
+    volumes: !override
+      - models_cache:/models
+      - ./logs/backend:/app/logs
+    # 无 --reload；worker 数按 CPU 调（默认 2）
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000
+             --workers ${BACKEND_WORKERS:-2} --proxy-headers
+             --forwarded-allow-ips='*'"
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- 前端
+  frontend:
+    restart: always
+    environment:
+      # 同源相对路径：浏览器请求 /api/v1/... → Nginx → backend，彻底绕开 CORS。
+      # 若需前后端分开域名部署，改回绝对地址并在 backend 的
+      # BACKEND_CORS_ORIGINS 里加上前端域名。
+      NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-/api/v1}
+      NUXT_PUBLIC_SSE_BASE: ${NUXT_PUBLIC_SSE_BASE:-/api/v1}
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- 数据服务自愈
+  postgres:
+    restart: always
+    logging: *default-logging
+  redis:
+    restart: always
+    logging: *default-logging
+  milvus:
+    restart: always
+    logging: *default-logging
+  etcd:
+    restart: always
+    logging: *default-logging
+  minio:
+    restart: always
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Nginx 反向代理
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: rc-nginx
+    restart: always
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      # 启用 HTTPS 时取消注释（同时按 deploy/HTTPS.md 打开 443 那个 server 块）
+      # - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/nginx/research-copilot.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./logs/nginx:/var/log/nginx            # 访问/错误日志落盘
+      - ./deploy/certs:/etc/nginx/certs:ro     # 证书（未放证书时目录为空，不影响 HTTP 启动）
+      - ./deploy/certbot-webroot:/var/www/certbot   # ACME 校验目录
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    healthcheck:
+      # 打的是 Nginx 自己的 /healthz（不经过 backend），所以后端抖动不会让代理被判死
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    networks: [rc-net]

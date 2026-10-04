@@ -5,6 +5,11 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+# devDependencies 里的 @playwright/test 带 postinstall 钩子，默认会下 ~300MB 浏览器。
+# 生产镜像跑的是 .output，不需要浏览器 —— 这一行把下载关掉，否则 build 又慢又臃肿。
+# 要跑 E2E 请在本机（或 CI 的独立 job）里 `npx playwright install chromium`。
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
 # 先只拷 package.json：依赖没变时这层直接命中缓存
 COPY package.json ./
 RUN npm install --no-audit --no-fund

@@ -1,0 +1,41 @@
+# ============================================================================
+# Research Copilot · GPU 覆盖层（可选）
+#
+# 前提：NVIDIA 驱动 + nvidia-container-toolkit（docker run --gpus all 能跑）
+#   验证：docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+#
+# 用法（与生产层叠加）：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                  -f docker-compose.gpu.yml up -d --build
+#
+# 说明：本机（Windows）实测 NVML 不可用，所以这一层**未在真机验证过**，
+# 只保证 YAML 结构合法（docker compose config 通过）。上真卡后请复跑
+#   docker compose exec backend python -c "import torch;print(torch.cuda.is_available())"
+# ============================================================================
+name: research-copilot
+
+services:
+  backend:
+    environment:
+      # auto = 有卡就用；这里显式钉死 cuda，避免容器里探测失败悄悄回落 CPU
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cuda}
+      MINERU_DEVICE: ${MINERU_DEVICE:-cuda}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Milvus 要用 GPU 建索引得换 `-gpu` 镜像（CPU 版 standalone 给卡也用不上）。
+  # 需要就把 image 换掉；只想给 embedding 加速的话这一段可以删掉。
+  milvus:
+    image: ${MILVUS_IMAGE:-milvusdb/milvus:v2.4.15-gpu}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

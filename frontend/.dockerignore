@@ -8,3 +8,8 @@ dist
 npm-debug.log*
 Dockerfile
 .dockerignore
+# E2E 与产物：镜像里不跑 Playwright，别把浏览器的几百 MB 带进去
+e2e
+e2e-report
+test-results
+playwright.config.ts

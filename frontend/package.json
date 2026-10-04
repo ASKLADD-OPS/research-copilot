@@ -10,7 +10,11 @@
     "postinstall": "nuxt prepare",
     "typecheck": "nuxt typecheck",
     "check:md": "node scripts/md-check.mjs",
-    "check:sync": "node scripts/scroll-sync-check.mjs"
+    "check:sync": "node scripts/scroll-sync-check.mjs",
+    "e2e": "playwright test",
+    "e2e:headed": "playwright test --headed",
+    "e2e:install": "playwright install chromium",
+    "e2e:report": "playwright show-report e2e-report"
   },
   "dependencies": {
     "@phosphor-icons/vue": "^2.2.1",
@@ -26,6 +30,7 @@
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^26.6.3",

@@ -51,12 +51,21 @@ x-backend-env: &backend-env
   SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
   BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
 
+# 日志轮转：默认 json-file 无上限，评测期跑两天能把盘写满。
+# 20MB × 5 = 每容器最多 100MB，够排查用。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # ---------------- 关系库 ----------------
   postgres:
     image: postgres:16-alpine
     container_name: rc-postgres
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-copilot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot_pass}
@@ -78,6 +87,7 @@ services:
     image: redis:7-alpine
     container_name: rc-redis
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "${REDIS_PORT_HOST:-6379}:6379"
@@ -96,6 +106,7 @@ services:
     image: quay.io/coreos/etcd:v3.5.16
     container_name: rc-etcd
     restart: unless-stopped
+    logging: *default-logging
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -120,6 +131,7 @@ services:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     container_name: rc-minio
     restart: unless-stopped
+    logging: *default-logging
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
@@ -139,6 +151,7 @@ services:
     image: milvusdb/milvus:v2.4.15
     container_name: rc-milvus
     restart: unless-stopped
+    logging: *default-logging
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -176,6 +189,7 @@ services:
         INSTALL_MINERU: ${INSTALL_MINERU:-false}
     container_name: rc-backend
     restart: unless-stopped
+    logging: *default-logging
     environment: *backend-env
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -208,6 +222,7 @@ services:
       dockerfile: Dockerfile
     container_name: rc-frontend
     restart: unless-stopped
+    logging: *default-logging
     environment:
       NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:8000/api/v1}
       NUXT_PUBLIC_SSE_BASE: ${NUXT_PUBLIC_SSE_BASE:-http://localhost:8000/api/v1}

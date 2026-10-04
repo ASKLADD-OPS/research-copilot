@@ -45,5 +45,14 @@ Thumbs.db
 # ---- Milvus 落盘数据（若在本地起过）----
 volumes/
 
+# ---- 运行期日志（生产 compose 落盘到 ./logs）----
+logs/
+
+# ---- 前端 E2E 产物 ----
+frontend/e2e-report/
+frontend/test-results/
+frontend/playwright-report/
+frontend/.playwright/
+
 # ---- 文档构建中间产物（PDF 本体在 docs/ 下，会入库）----
 docs/_build/

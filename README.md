@@ -273,16 +273,35 @@ make lint fmt        # ruff
 ```bash
 make test            # 容器内跑全部测试
 # 或本机（需已装依赖）：
-cd backend && pytest -m 'not model'      # 614 passed / 2 skipped / 10 deselected
+cd backend && pytest -m 'not model'      # 616 passed / 2 skipped / 10 deselected
 pytest -m model -s tests/test_embeddings.py   # 真加载 bge-m3（约 2GB 权重），默认不跑
+
+# 覆盖率（门槛 70%，写在 pyproject 的 [tool.coverage.report] fail_under）
+make test-cov        # = pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 
 # 前端自动检查（node 直接 import .ts，无需构建）
 cd frontend && npm run check:md && npm run check:sync
+
+# 前端 E2E（Playwright，不依赖后端）
+npm run e2e:install  # 首次：下载 chromium
+npm run e2e
 ```
 
 > 后端**不依赖 LLM / 网络**即可跑单测：RAG 融合、溯源校验、意图映射、契约字段等纯逻辑都有离线用例。
 > 跑测试建议用隔离 venv，并在**关闭沙箱的前台会话**里跑 —— pytest 收尾会批量删自己的 basetemp，
 > 容易被批量删除守卫拦成「测试崩了」的假象。
+> 覆盖率更脆：coverage 收尾要删 `.coverage.<host>.<pid>` 这批并行数据文件，
+> **同一个会话里累计删除数一过 50 就会把覆盖率合并拦成 `INTERNALERROR`（测试其实全绿）**。
+> 对策：`COVERAGE_FILE=C:/tmp/rc.coverage` 写到仓库外 + 换一个新会话再跑。详见 `PITFALLS.md`。
+
+### 提交前自检
+
+```bash
+python scripts/preflight.py                  # 密钥 / 文档页数 / git / 交付资产
+python scripts/preflight.py --url https://<演示域名>   # 顺带查在线服务
+```
+
+只依赖标准库，退出码非 0 = 有必改项。检查项与验收标准见 **`docs/提交材料与验收.md`**。
 
 ### 复现技术文档里的实验
 

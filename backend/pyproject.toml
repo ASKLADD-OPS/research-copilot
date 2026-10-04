@@ -139,3 +139,25 @@ markers = [
     "e2e_smoke: 冒烟",
 ]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+# ============================================================================
+# 覆盖率门槛（跑 `pytest --cov=app` 或 `make test-cov` 时生效；普通 pytest 不触发）
+#
+# 2026-10-04 实测基线：614 passed / 2 skipped，TOTAL 76.8%（默认 -m 'not model'）。
+# 门槛定 70% —— 留 6 个点余量：既不为凑数字补无意义用例，又能挡住覆盖率塌方。
+# 想单独看某个模块漏了哪几行：pytest --cov=app --cov-report=term-missing
+# ============================================================================
+[tool.coverage.run]
+source = ["app"]
+branch = false
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

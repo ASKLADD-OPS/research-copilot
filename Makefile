@@ -5,7 +5,7 @@ SHELL := /bin/sh
 COMPOSE := docker compose
 
 .PHONY: help init up down restart logs ps build sh-backend sh-db migrate revision \
-        test test-backend lint fmt clean reset
+        test test-backend test-cov e2e up-prod up-gpu lint fmt clean reset
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -54,6 +54,19 @@ test: ## 跑后端全部测试
 
 test-backend: ## 本机直接跑测试（需已装依赖，不需要 docker）
 	cd backend && pytest
+
+test-cov: ## 跑后端测试并校验覆盖率门槛（≥70%）
+	cd backend && pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+
+e2e: ## 跑前端 Playwright E2E（自动拉起 dev server）
+	cd frontend && npm run e2e
+
+up-prod: init ## 生产形态启动（含 Nginx 反向代理）
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+	@echo "[ok] 入口 http://localhost:$${HTTP_PORT:-80}"
+
+up-gpu: init ## 生产 + GPU 形态启动（需 nvidia-container-toolkit）
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
 
 lint: ## ruff 检查
 	cd backend && ruff check .
