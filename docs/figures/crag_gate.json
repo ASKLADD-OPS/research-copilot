@@ -1,0 +1,115 @@
+{
+  "meta": {
+    "n_queries": 12,
+    "top_k": 5,
+    "cheap_skip_low": 0.1,
+    "cheap_skip_high": 0.45,
+    "note": "语料为英文为主 + 少量中文；查询中英各半，用于暴露跨语言下的预判行为"
+  },
+  "verdict_distribution": {
+    "NEEDS_LLM": 6,
+    "relevant": 4,
+    "irrelevant": 2
+  },
+  "llm_skipped": 6,
+  "needs_llm": 6,
+  "false_irrelevant_when_gold_retrieved": 2,
+  "by_query_language": {
+    "zh": {
+      "n": 7,
+      "mean_coverage": 0.222,
+      "skipped_llm": 3
+    },
+    "en": {
+      "n": 5,
+      "mean_coverage": 0.555,
+      "skipped_llm": 3
+    }
+  },
+  "rows": [
+    {
+      "query": "What does HNSW stand for and what does it do?",
+      "type": "lexical",
+      "coverage": 0.375,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    },
+    {
+      "query": "Which model unifies dense sparse and multi-vector retrieval?",
+      "type": "lexical",
+      "coverage": 0.75,
+      "verdict": "relevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "What is the default k in Reciprocal Rank Fusion?",
+      "type": "lexical",
+      "coverage": 0.75,
+      "verdict": "relevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "Describe the Reflexion self-reflection memory.",
+      "type": "lexical",
+      "coverage": 0.4,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    },
+    {
+      "query": "What does Corrective RAG do when retrieved documents look bad?",
+      "type": "lexical",
+      "coverage": 0.5,
+      "verdict": "relevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "怎样让索引小到能整个塞进内存里？",
+      "type": "semantic",
+      "coverage": 0.0667,
+      "verdict": "irrelevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "怎么避免模型编造材料里没有的内容？",
+      "type": "semantic",
+      "coverage": 0.5,
+      "verdict": "relevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "文档太长时切块应该切在哪里比较好？",
+      "type": "semantic",
+      "coverage": 0.2667,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    },
+    {
+      "query": "怎么判断答案里每个论断是不是真有出处？",
+      "type": "semantic",
+      "coverage": 0.0,
+      "verdict": "irrelevant",
+      "gold_retrieved": true
+    },
+    {
+      "query": "扫描出来没有文字层的论文要怎么处理？",
+      "type": "semantic",
+      "coverage": 0.25,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    },
+    {
+      "query": "工具协议 schema 对模型选参数有什么帮助？",
+      "type": "mixed",
+      "coverage": 0.3125,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    },
+    {
+      "query": "引文网络里怎么找出连接不同领域的枢纽论文？",
+      "type": "mixed",
+      "coverage": 0.1579,
+      "verdict": "NEEDS_LLM",
+      "gold_retrieved": true
+    }
+  ]
+}

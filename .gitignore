@@ -44,3 +44,6 @@ Thumbs.db
 
 # ---- Milvus 落盘数据（若在本地起过）----
 volumes/
+
+# ---- 文档构建中间产物（PDF 本体在 docs/ 下，会入库）----
+docs/_build/
